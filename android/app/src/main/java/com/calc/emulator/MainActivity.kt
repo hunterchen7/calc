@@ -636,58 +636,98 @@ fun DPad(
     val gapWidthScale = 0.16f
     val innerRadiusScale = 0.45f
 
-    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+    val upAngle = 270f
+    val leftAngle = 180f
+    val rightAngle = 0f
+    val downAngle = 90f
+
+    var pressedDir by remember { mutableStateOf<DPadDirection?>(null) }
+
+    Box(
+        modifier = modifier.pointerInput(Unit) {
+            detectTapGestures(
+                onPress = { offset ->
+                    val hitSize = Size(size.width.toFloat(), size.height.toFloat())
+                    val hit = hitTestDPad(
+                        offset = offset,
+                        size = hitSize,
+                        sweepAngle = sweepAngle,
+                        innerRadiusScale = innerRadiusScale,
+                        gapWidthScale = gapWidthScale
+                    )
+                    if (hit == null) {
+                        return@detectTapGestures
+                    }
+                    pressedDir = hit
+                    when (hit) {
+                        DPadDirection.UP -> onKeyDown(1, 3)
+                        DPadDirection.LEFT -> onKeyDown(2, 3)
+                        DPadDirection.RIGHT -> onKeyDown(2, 4)
+                        DPadDirection.DOWN -> onKeyDown(3, 4)
+                    }
+                    try {
+                        awaitRelease()
+                    } finally {
+                        when (hit) {
+                            DPadDirection.UP -> onKeyUp(1, 3)
+                            DPadDirection.LEFT -> onKeyUp(2, 3)
+                            DPadDirection.RIGHT -> onKeyUp(2, 4)
+                            DPadDirection.DOWN -> onKeyUp(3, 4)
+                        }
+                        pressedDir = null
+                    }
+                }
+            )
+        },
+        contentAlignment = Alignment.Center
+    ) {
         DPadSegment(
-            startAngle = 270f - sweepAngle / 2f,
+            startAngle = upAngle - sweepAngle / 2f,
             sweepAngle = sweepAngle,
-            directionAngle = 270f,
+            directionAngle = upAngle,
             innerRadiusScale = innerRadiusScale,
             gapWidthScale = gapWidthScale,
             fillColor = segmentColor,
             pressedColor = pressedColor,
             borderColor = borderColor,
             arrowColor = arrowColor,
-            onDown = { onKeyDown(1, 3) },
-            onUp = { onKeyUp(1, 3) }
+            isPressed = pressedDir == DPadDirection.UP
         )
         DPadSegment(
-            startAngle = 180f - sweepAngle / 2f,
+            startAngle = leftAngle - sweepAngle / 2f,
             sweepAngle = sweepAngle,
-            directionAngle = 180f,
+            directionAngle = leftAngle,
             innerRadiusScale = innerRadiusScale,
             gapWidthScale = gapWidthScale,
             fillColor = segmentColor,
             pressedColor = pressedColor,
             borderColor = borderColor,
             arrowColor = arrowColor,
-            onDown = { onKeyDown(2, 3) },
-            onUp = { onKeyUp(2, 3) }
+            isPressed = pressedDir == DPadDirection.LEFT
         )
         DPadSegment(
-            startAngle = 0f - sweepAngle / 2f,
+            startAngle = rightAngle - sweepAngle / 2f,
             sweepAngle = sweepAngle,
-            directionAngle = 0f,
+            directionAngle = rightAngle,
             innerRadiusScale = innerRadiusScale,
             gapWidthScale = gapWidthScale,
             fillColor = segmentColor,
             pressedColor = pressedColor,
             borderColor = borderColor,
             arrowColor = arrowColor,
-            onDown = { onKeyDown(2, 4) },
-            onUp = { onKeyUp(2, 4) }
+            isPressed = pressedDir == DPadDirection.RIGHT
         )
         DPadSegment(
-            startAngle = 90f - sweepAngle / 2f,
+            startAngle = downAngle - sweepAngle / 2f,
             sweepAngle = sweepAngle,
-            directionAngle = 90f,
+            directionAngle = downAngle,
             innerRadiusScale = innerRadiusScale,
             gapWidthScale = gapWidthScale,
             fillColor = segmentColor,
             pressedColor = pressedColor,
             borderColor = borderColor,
             arrowColor = arrowColor,
-            onDown = { onKeyDown(3, 4) },
-            onUp = { onKeyUp(3, 4) }
+            isPressed = pressedDir == DPadDirection.DOWN
         )
 
         DPadGaps(
@@ -736,32 +776,10 @@ fun DPadSegment(
     pressedColor: Color,
     borderColor: Color,
     arrowColor: Color,
-    onDown: () -> Unit,
-    onUp: () -> Unit
+    isPressed: Boolean
 ) {
-    var isPressed by remember { mutableStateOf(false) }
-
     Canvas(
-        modifier = Modifier
-            .fillMaxSize()
-            .pointerInput(startAngle, sweepAngle) {
-                detectTapGestures(
-                    onPress = { offset ->
-                        val hitSize = Size(size.width.toFloat(), size.height.toFloat())
-                        if (!isPointInSegment(offset, hitSize, startAngle, sweepAngle, innerRadiusScale, gapWidthScale)) {
-                            return@detectTapGestures
-                        }
-                        isPressed = true
-                        onDown()
-                        try {
-                            awaitRelease()
-                        } finally {
-                            isPressed = false
-                            onUp()
-                        }
-                    }
-                )
-            }
+        modifier = Modifier.fillMaxSize()
     ) {
         val outerRadius = min(size.width, size.height) / 2f
         val innerRadius = outerRadius * innerRadiusScale
@@ -788,8 +806,21 @@ fun DPadSegment(
             close()
         }
 
-        drawPath(segmentPath, color = if (isPressed) pressedColor else fillColor)
-        drawPath(segmentPath, color = borderColor, style = Stroke(width = strokeWidth))
+        val activeFill = if (isPressed) pressedColor else fillColor
+        val rimColor = if (isPressed) {
+            blendColors(borderColor, Color.Black, 0.35f)
+        } else {
+            blendColors(borderColor, Color.White, 0.35f)
+        }
+        val innerRim = if (isPressed) {
+            blendColors(activeFill, Color.Black, 0.15f)
+        } else {
+            blendColors(activeFill, Color.White, 0.18f)
+        }
+
+        drawPath(segmentPath, color = activeFill)
+        drawPath(segmentPath, color = rimColor, style = Stroke(width = strokeWidth))
+        drawPath(segmentPath, color = innerRim, style = Stroke(width = strokeWidth * 0.6f))
 
         val arrowRadius = (innerRadius + outerRadius) * 0.5f
         val arrowCenter = Offset(
@@ -816,6 +847,13 @@ fun DPadSegment(
         }
         drawPath(arrowPath, color = arrowColor)
     }
+}
+
+private enum class DPadDirection {
+    UP,
+    LEFT,
+    RIGHT,
+    DOWN
 }
 
 @Composable
@@ -1015,6 +1053,27 @@ private fun isPointInGap(dx: Float, dy: Float, outerRadius: Float, gapWidthScale
     val gapWidth = outerRadius * gapWidthScale
     val threshold = gapWidth * 0.5f * 1.41421356f
     return abs(dy - dx) < threshold || abs(dy + dx) < threshold
+}
+
+private fun hitTestDPad(
+    offset: Offset,
+    size: Size,
+    sweepAngle: Float,
+    innerRadiusScale: Float,
+    gapWidthScale: Float
+): DPadDirection? {
+    val upStart = 270f - sweepAngle / 2f
+    val leftStart = 180f - sweepAngle / 2f
+    val rightStart = 0f - sweepAngle / 2f
+    val downStart = 90f - sweepAngle / 2f
+
+    return when {
+        isPointInSegment(offset, size, upStart, sweepAngle, innerRadiusScale, gapWidthScale) -> DPadDirection.UP
+        isPointInSegment(offset, size, leftStart, sweepAngle, innerRadiusScale, gapWidthScale) -> DPadDirection.LEFT
+        isPointInSegment(offset, size, rightStart, sweepAngle, innerRadiusScale, gapWidthScale) -> DPadDirection.RIGHT
+        isPointInSegment(offset, size, downStart, sweepAngle, innerRadiusScale, gapWidthScale) -> DPadDirection.DOWN
+        else -> null
+    }
 }
 
 private fun Float.toRadians(): Float {
