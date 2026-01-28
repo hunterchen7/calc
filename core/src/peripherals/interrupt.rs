@@ -137,6 +137,20 @@ mod tests {
     }
 
     #[test]
+    fn test_reset() {
+        let mut ic = InterruptController::new();
+        ic.raise(sources::TIMER1);
+        ic.enabled = sources::TIMER1;
+        assert!(ic.irq_pending());
+
+        ic.reset();
+        assert_eq!(ic.status, 0);
+        assert_eq!(ic.enabled, 0);
+        assert_eq!(ic.raw, 0);
+        assert!(!ic.irq_pending());
+    }
+
+    #[test]
     fn test_raise_and_pending() {
         let mut ic = InterruptController::new();
 
@@ -192,5 +206,76 @@ mod tests {
         // Raise keypad
         ic.raise(sources::KEYPAD);
         assert!(ic.irq_pending());
+    }
+
+    #[test]
+    fn test_raw_state() {
+        let mut ic = InterruptController::new();
+
+        // Raise interrupt - sets both raw and status
+        ic.raise(sources::TIMER2);
+        assert_eq!(ic.read(regs::RAW), sources::TIMER2 as u8);
+        assert_eq!(ic.read(regs::STATUS), sources::TIMER2 as u8);
+
+        // Clear raw state (source went inactive)
+        ic.clear_raw(sources::TIMER2);
+        assert_eq!(ic.read(regs::RAW), 0);
+        // Status should still be latched
+        assert_eq!(ic.read(regs::STATUS), sources::TIMER2 as u8);
+    }
+
+    #[test]
+    fn test_multi_byte_status() {
+        let mut ic = InterruptController::new();
+
+        // Raise LCD interrupt (bit 10 - in byte 1)
+        ic.raise(sources::LCD);
+
+        // Read byte 0 should be 0
+        assert_eq!(ic.read(regs::STATUS), 0);
+        // Read byte 1 should have bit 2 set (bit 10 >> 8 = bit 2)
+        assert_eq!(ic.read(regs::STATUS + 1), (sources::LCD >> 8) as u8);
+    }
+
+    #[test]
+    fn test_on_key_interrupt() {
+        let mut ic = InterruptController::new();
+
+        // Enable ON key interrupt
+        ic.enabled = sources::ON_KEY;
+
+        // Raise ON key
+        ic.raise(sources::ON_KEY);
+        assert!(ic.irq_pending());
+        assert_eq!(ic.read(regs::STATUS), sources::ON_KEY as u8);
+    }
+
+    #[test]
+    fn test_all_timer_sources() {
+        let mut ic = InterruptController::new();
+
+        // Enable all timer interrupts
+        ic.enabled = sources::TIMER1 | sources::TIMER2 | sources::TIMER3;
+
+        // Raise timer 3
+        ic.raise(sources::TIMER3);
+        assert!(ic.irq_pending());
+
+        // Acknowledge timer 3
+        ic.acknowledge(sources::TIMER3);
+        assert!(!ic.irq_pending());
+
+        // Raise all timers
+        ic.raise(sources::TIMER1);
+        ic.raise(sources::TIMER2);
+        ic.raise(sources::TIMER3);
+
+        // Acknowledge only timer 1
+        ic.acknowledge(sources::TIMER1);
+        assert!(ic.irq_pending()); // Timer 2 and 3 still pending
+
+        // Acknowledge timer 2 and 3
+        ic.acknowledge(sources::TIMER2 | sources::TIMER3);
+        assert!(!ic.irq_pending());
     }
 }

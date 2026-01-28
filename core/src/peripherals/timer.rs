@@ -223,6 +223,33 @@ mod tests {
     }
 
     #[test]
+    fn test_reset() {
+        let mut timer = Timer::new();
+        timer.counter = 0x12345678;
+        timer.reset_value = 0x1000;
+        timer.control = ctrl::ENABLE | ctrl::COUNT_UP;
+        timer.accum_cycles = 100;
+
+        timer.reset();
+        assert_eq!(timer.counter, 0);
+        assert_eq!(timer.reset_value, 0);
+        assert_eq!(timer.control, 0);
+        assert_eq!(timer.accum_cycles, 0);
+        assert!(!timer.is_enabled());
+    }
+
+    #[test]
+    fn test_disabled_timer_no_tick() {
+        let mut timer = Timer::new();
+        timer.counter = 100;
+        // Timer is disabled by default
+
+        let irq = timer.tick(50);
+        assert!(!irq);
+        assert_eq!(timer.counter, 100); // Should not change
+    }
+
+    #[test]
     fn test_count_up() {
         let mut timer = Timer::new();
         timer.control = ctrl::ENABLE | ctrl::COUNT_UP;
@@ -245,6 +272,30 @@ mod tests {
     }
 
     #[test]
+    fn test_underflow_interrupt() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE | ctrl::INT_ON_ZERO;
+        timer.counter = 5;
+
+        // Tick more than counter value should underflow
+        let irq = timer.tick(10);
+        assert!(irq);
+    }
+
+    #[test]
+    fn test_underflow_with_reset() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE | ctrl::USE_RESET;
+        timer.counter = 5;
+        timer.reset_value = 1000;
+
+        // Underflow should reload from reset value
+        timer.tick(10);
+        // After underflow, counter wraps with reset_value
+        assert!(timer.counter < 1000);
+    }
+
+    #[test]
     fn test_overflow_interrupt() {
         let mut timer = Timer::new();
         timer.control = ctrl::ENABLE | ctrl::COUNT_UP | ctrl::INT_ON_ZERO;
@@ -252,6 +303,16 @@ mod tests {
 
         let irq = timer.tick(2);
         assert!(irq);
+    }
+
+    #[test]
+    fn test_overflow_no_interrupt_when_disabled() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE | ctrl::COUNT_UP; // INT_ON_ZERO not set
+        timer.counter = 0xFFFFFFFF;
+
+        let irq = timer.tick(2);
+        assert!(!irq); // No interrupt because INT_ON_ZERO is not set
     }
 
     #[test]
@@ -264,6 +325,38 @@ mod tests {
         let irq = timer.tick(8);
         assert!(!irq);
         assert_eq!(timer.counter, 2);
+    }
+
+    #[test]
+    fn test_clock_divider_accumulation() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE | ctrl::COUNT_UP | (3 << ctrl::CLOCK_DIV_SHIFT);
+        // Divider is 8
+
+        // Tick 3 cycles - not enough for a tick
+        timer.tick(3);
+        assert_eq!(timer.counter, 0);
+
+        // Tick 5 more = 8 total, should get 1 tick
+        timer.tick(5);
+        assert_eq!(timer.counter, 1);
+
+        // Tick 17 more = 2 ticks with 1 leftover
+        timer.tick(17);
+        assert_eq!(timer.counter, 3);
+    }
+
+    #[test]
+    fn test_all_clock_dividers() {
+        for div_bits in 0..=7 {
+            let mut timer = Timer::new();
+            timer.control = ctrl::ENABLE | ctrl::COUNT_UP | (div_bits << ctrl::CLOCK_DIV_SHIFT);
+            timer.counter = 0;
+
+            let expected_divider = 1 << div_bits;
+            timer.tick(expected_divider);
+            assert_eq!(timer.counter, 1, "Divider {} should give 1 tick", expected_divider);
+        }
     }
 
     #[test]
@@ -280,6 +373,54 @@ mod tests {
         assert_eq!(timer.read(1), 0x34);
         assert_eq!(timer.read(2), 0x56);
         assert_eq!(timer.read(3), 0x78);
+    }
+
+    #[test]
+    fn test_read_write_reset_value() {
+        let mut timer = Timer::new();
+
+        timer.write(regs::RESET, 0xAB);
+        timer.write(regs::RESET + 1, 0xCD);
+        timer.write(regs::RESET + 2, 0xEF);
+        timer.write(regs::RESET + 3, 0x12);
+
+        assert_eq!(timer.reset_value, 0x12EFCDAB);
+        assert_eq!(timer.read(regs::RESET), 0xAB);
+        assert_eq!(timer.read(regs::RESET + 1), 0xCD);
+    }
+
+    #[test]
+    fn test_read_write_match_values() {
+        let mut timer = Timer::new();
+
+        // Write match1
+        timer.write(regs::MATCH1, 0x11);
+        timer.write(regs::MATCH1 + 1, 0x22);
+        timer.write(regs::MATCH1 + 2, 0x33);
+        timer.write(regs::MATCH1 + 3, 0x44);
+
+        assert_eq!(timer.match1, 0x44332211);
+
+        // Write match2
+        timer.write(regs::MATCH2, 0xAA);
+        timer.write(regs::MATCH2 + 1, 0xBB);
+        timer.write(regs::MATCH2 + 2, 0xCC);
+        timer.write(regs::MATCH2 + 3, 0xDD);
+
+        assert_eq!(timer.match2, 0xDDCCBBAA);
+    }
+
+    #[test]
+    fn test_control_register() {
+        let mut timer = Timer::new();
+
+        timer.write_control(ctrl::ENABLE | ctrl::COUNT_UP | ctrl::INT_ON_ZERO);
+
+        assert!(timer.is_enabled());
+        assert!(timer.count_up());
+        assert!(timer.int_on_zero());
+
+        assert_eq!(timer.read_control(), ctrl::ENABLE | ctrl::COUNT_UP | ctrl::INT_ON_ZERO);
     }
 
     #[test]

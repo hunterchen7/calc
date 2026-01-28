@@ -189,6 +189,21 @@ mod tests {
     fn test_new() {
         let kp = KeypadController::new();
         assert_eq!(kp.mode(), mode::IDLE);
+        assert_eq!(kp.size, 0x88); // 8x8 matrix
+    }
+
+    #[test]
+    fn test_reset() {
+        let mut kp = KeypadController::new();
+        kp.control = mode::CONTINUOUS;
+        kp.int_mask = 0x04;
+        kp.int_status = 0x01;
+
+        kp.reset();
+        assert_eq!(kp.mode(), mode::IDLE);
+        assert_eq!(kp.int_mask, 0);
+        assert_eq!(kp.int_status, 0);
+        assert_eq!(kp.size, 0x88);
     }
 
     #[test]
@@ -221,6 +236,23 @@ mod tests {
     }
 
     #[test]
+    fn test_read_high_byte() {
+        let kp = KeypadController::new();
+        let mut keys = empty_key_state();
+
+        // Press key - should only affect low byte
+        keys[0][3] = true;
+
+        // Low byte should have bit 3 clear
+        let lo = kp.read(regs::DATA_BASE, &keys);
+        assert_eq!(lo, 0xFF ^ (1 << 3));
+
+        // High byte should be 0xFF (no keys in columns 8-15)
+        let hi = kp.read(regs::DATA_BASE + 1, &keys);
+        assert_eq!(hi, 0xFF);
+    }
+
+    #[test]
     fn test_multiple_keys() {
         let kp = KeypadController::new();
         let mut keys = empty_key_state();
@@ -233,6 +265,65 @@ mod tests {
         let data = kp.read(regs::DATA_BASE, &keys);
         let expected = 0xFF ^ (1 << 0) ^ (1 << 2) ^ (1 << 5);
         assert_eq!(data, expected as u8);
+    }
+
+    #[test]
+    fn test_all_rows() {
+        let kp = KeypadController::new();
+        let mut keys = empty_key_state();
+
+        // Press one key in each row
+        for row in 0..KEYPAD_ROWS {
+            keys[row][row] = true;
+        }
+
+        // Verify each row
+        for row in 0..KEYPAD_ROWS {
+            let data = kp.read(regs::DATA_BASE + (row as u32) * 2, &keys);
+            let expected = 0xFF ^ (1 << row);
+            assert_eq!(data, expected as u8, "Row {} should have bit {} clear", row, row);
+        }
+    }
+
+    #[test]
+    fn test_write_control() {
+        let mut kp = KeypadController::new();
+        let keys = empty_key_state();
+
+        kp.write(regs::CONTROL, mode::CONTINUOUS);
+        assert_eq!(kp.read(regs::CONTROL, &keys), mode::CONTINUOUS);
+        assert_eq!(kp.mode(), mode::CONTINUOUS);
+    }
+
+    #[test]
+    fn test_write_size() {
+        let mut kp = KeypadController::new();
+        let keys = empty_key_state();
+
+        kp.write(regs::SIZE, 0x44); // 4x4 matrix
+        assert_eq!(kp.read(regs::SIZE, &keys), 0x44);
+    }
+
+    #[test]
+    fn test_write_int_ack() {
+        let mut kp = KeypadController::new();
+        let keys = empty_key_state();
+
+        kp.write(regs::INT_ACK, 0x07);
+        assert_eq!(kp.read(regs::INT_ACK, &keys), 0x07);
+        assert_eq!(kp.int_mask, 0x07);
+    }
+
+    #[test]
+    fn test_clear_int_status() {
+        let mut kp = KeypadController::new();
+        let keys = empty_key_state();
+
+        kp.int_status = 0xFF;
+
+        // Writing to INT_STATUS should clear those bits
+        kp.write(regs::INT_STATUS, 0x05);
+        assert_eq!(kp.read(regs::INT_STATUS, &keys), 0xFF & !0x05);
     }
 
     #[test]
@@ -253,5 +344,49 @@ mod tests {
         // Press a key
         keys[0][0] = true;
         assert!(kp.check_interrupt(&keys));
+    }
+
+    #[test]
+    fn test_interrupt_different_modes() {
+        let mut kp = KeypadController::new();
+        let mut keys = empty_key_state();
+        keys[0][0] = true;
+        kp.int_mask = 0x04; // Enable any key interrupt
+
+        // IDLE mode - no interrupt
+        kp.control = mode::IDLE;
+        assert!(!kp.check_interrupt(&keys));
+
+        // SINGLE mode - no interrupt
+        kp.control = mode::SINGLE;
+        assert!(!kp.check_interrupt(&keys));
+
+        // CONTINUOUS mode - interrupt!
+        kp.control = mode::CONTINUOUS;
+        assert!(kp.check_interrupt(&keys));
+
+        // MULTI_GROUP mode - no interrupt (only continuous triggers)
+        kp.control = mode::MULTI_GROUP;
+        assert!(!kp.check_interrupt(&keys));
+    }
+
+    #[test]
+    fn test_read_out_of_range_row() {
+        let kp = KeypadController::new();
+        let keys = empty_key_state();
+
+        // Rows beyond 7 should return 0xFF
+        let data = kp.read(regs::DATA_BASE + 0x10, &keys); // Row 8
+        assert_eq!(data, 0xFF);
+    }
+
+    #[test]
+    fn test_read_unknown_register() {
+        let kp = KeypadController::new();
+        let keys = empty_key_state();
+
+        // Unknown register should return 0xFF
+        let data = kp.read(0x30, &keys);
+        assert_eq!(data, 0xFF);
     }
 }

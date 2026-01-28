@@ -263,6 +263,50 @@ mod tests {
     }
 
     #[test]
+    fn test_reset() {
+        let mut p = Peripherals::new();
+
+        // Modify some state
+        p.interrupt.raise(sources::TIMER1);
+        // Enable interrupt via write
+        p.write(INT_BASE + 0x04, sources::TIMER1 as u8);
+        p.timer1.write_control(0x01); // Enable timer 1
+        p.set_key(0, 0, true);
+
+        assert!(p.irq_pending());
+        assert!(p.timer1.is_enabled());
+        assert!(p.key_state()[0][0]);
+
+        // Reset
+        p.reset();
+
+        assert!(!p.irq_pending());
+        assert!(!p.timer1.is_enabled());
+        assert!(!p.key_state()[0][0]);
+    }
+
+    #[test]
+    fn test_set_key() {
+        let mut p = Peripherals::new();
+
+        p.set_key(2, 3, true);
+        assert!(p.key_state()[2][3]);
+
+        p.set_key(2, 3, false);
+        assert!(!p.key_state()[2][3]);
+    }
+
+    #[test]
+    fn test_set_key_bounds_check() {
+        let mut p = Peripherals::new();
+
+        // Should not panic for out-of-bounds
+        p.set_key(100, 100, true);
+        p.set_key(KEYPAD_ROWS, 0, true);
+        p.set_key(0, KEYPAD_COLS, true);
+    }
+
+    #[test]
     fn test_lcd_routing() {
         let mut p = Peripherals::new();
         let keys = empty_keys();
@@ -298,6 +342,34 @@ mod tests {
     }
 
     #[test]
+    fn test_timer2_routing() {
+        let mut p = Peripherals::new();
+        let keys = empty_keys();
+
+        // Write to timer 2 counter (offset 0x10 from TIMER_BASE)
+        p.write(TIMER_BASE + 0x10, 0xAB);
+        assert_eq!(p.read(TIMER_BASE + 0x10, &keys), 0xAB);
+
+        // Write timer 2 control (offset 0x34)
+        p.write(TIMER_BASE + 0x34, 0x01);
+        assert!(p.timer2.is_enabled());
+    }
+
+    #[test]
+    fn test_timer3_routing() {
+        let mut p = Peripherals::new();
+        let keys = empty_keys();
+
+        // Write to timer 3 counter (offset 0x20 from TIMER_BASE)
+        p.write(TIMER_BASE + 0x20, 0xCD);
+        assert_eq!(p.read(TIMER_BASE + 0x20, &keys), 0xCD);
+
+        // Write timer 3 control (offset 0x38)
+        p.write(TIMER_BASE + 0x38, 0x01);
+        assert!(p.timer3.is_enabled());
+    }
+
+    #[test]
     fn test_keypad_routing() {
         let p = Peripherals::new();
         let mut keys = empty_keys();
@@ -328,6 +400,160 @@ mod tests {
     }
 
     #[test]
+    fn test_control_routing() {
+        let mut p = Peripherals::new();
+        let keys = empty_keys();
+
+        // Write to control port (CPU speed)
+        p.write(CONTROL_BASE + 0x01, 0x02); // 24 MHz
+        assert_eq!(p.read(CONTROL_BASE + 0x01, &keys), 0x02);
+        assert_eq!(p.control.cpu_speed(), 0x02);
+    }
+
+    #[test]
+    fn test_control_alt_routing() {
+        let mut p = Peripherals::new();
+        let keys = empty_keys();
+
+        // Write via alternate address (0xFF0000, which is offset 0x1F0000)
+        p.write(CONTROL_ALT_BASE + 0x01, 0x01); // 12 MHz
+        assert_eq!(p.read(CONTROL_ALT_BASE + 0x01, &keys), 0x01);
+
+        // Should also be readable via primary address
+        assert_eq!(p.read(CONTROL_BASE + 0x01, &keys), 0x01);
+    }
+
+    #[test]
+    fn test_tick_timer_interrupt() {
+        let mut p = Peripherals::new();
+
+        // Enable timer 1 with interrupt on overflow
+        p.timer1.write_control(0x01 | 0x02 | 0x04); // ENABLE | COUNT_UP | INT_ON_ZERO
+        // Set counter to max via write API
+        p.write(TIMER_BASE, 0xFF);
+        p.write(TIMER_BASE + 1, 0xFF);
+        p.write(TIMER_BASE + 2, 0xFF);
+        p.write(TIMER_BASE + 3, 0xFF);
+
+        // Enable timer 1 interrupt in interrupt controller
+        p.write(INT_BASE + 0x04, sources::TIMER1 as u8);
+
+        // Tick should overflow timer and raise interrupt
+        let pending = p.tick(2);
+        assert!(pending);
+        assert!(p.irq_pending());
+    }
+
+    #[test]
+    fn test_tick_lcd_interrupt() {
+        let mut p = Peripherals::new();
+
+        // Enable LCD with VBLANK interrupt via write API
+        p.write(LCD_BASE + 0x10, 0x01); // ENABLE
+        p.write(LCD_BASE + 0x14, 0x01); // Enable VBLANK interrupt mask
+
+        // Enable LCD interrupt in interrupt controller (bit 10)
+        p.write(INT_BASE + 0x04, 0x00); // Low byte
+        p.write(INT_BASE + 0x05, (sources::LCD >> 8) as u8); // High byte (bit 10)
+
+        // Tick for a full frame (800_000 cycles at 48MHz/60Hz)
+        let pending = p.tick(800_000);
+        assert!(pending);
+        assert!(p.irq_pending());
+    }
+
+    #[test]
+    fn test_tick_keypad_interrupt() {
+        let mut p = Peripherals::new();
+
+        // Enable keypad in continuous mode with interrupt via write API
+        p.write(KEYPAD_BASE + 0x00, 0x02); // CONTINUOUS mode
+        p.write(KEYPAD_BASE + 0x0C, 0x04); // Enable any key interrupt
+
+        // Enable keypad interrupt in interrupt controller
+        p.write(INT_BASE + 0x04, sources::KEYPAD as u8);
+
+        // Press a key via internal key_state
+        p.set_key(0, 0, true);
+
+        // Tick should detect key and raise interrupt
+        let pending = p.tick(1);
+        assert!(pending);
+    }
+
+    #[test]
+    fn test_tick_multiple_timers() {
+        let mut p = Peripherals::new();
+
+        // Enable all 3 timers counting up with interrupt
+        let ctrl = 0x01 | 0x02 | 0x04; // ENABLE | COUNT_UP | INT_ON_ZERO
+
+        p.timer1.write_control(ctrl);
+        // Set counter to 0xFFFFFFFE via write API
+        p.write(TIMER_BASE, 0xFE);
+        p.write(TIMER_BASE + 1, 0xFF);
+        p.write(TIMER_BASE + 2, 0xFF);
+        p.write(TIMER_BASE + 3, 0xFF);
+
+        p.timer2.write_control(ctrl);
+        // Set counter to 0xFFFFFFFD via write API
+        p.write(TIMER_BASE + 0x10, 0xFD);
+        p.write(TIMER_BASE + 0x11, 0xFF);
+        p.write(TIMER_BASE + 0x12, 0xFF);
+        p.write(TIMER_BASE + 0x13, 0xFF);
+
+        p.timer3.write_control(ctrl);
+        // Set counter to 0xFFFFFFFC via write API
+        p.write(TIMER_BASE + 0x20, 0xFC);
+        p.write(TIMER_BASE + 0x21, 0xFF);
+        p.write(TIMER_BASE + 0x22, 0xFF);
+        p.write(TIMER_BASE + 0x23, 0xFF);
+
+        // Enable all timer interrupts
+        let enabled = sources::TIMER1 | sources::TIMER2 | sources::TIMER3;
+        p.write(INT_BASE + 0x04, enabled as u8);
+
+        // Tick 2 cycles - should overflow timer 1
+        let pending = p.tick(2);
+        assert!(pending);
+
+        // Tick 1 more - should overflow timer 2
+        p.tick(1);
+
+        // Tick 1 more - should overflow timer 3
+        p.tick(1);
+
+        // All 3 timers should have raised interrupts
+        assert_ne!(p.interrupt.read(0x00) & sources::TIMER1 as u8, 0);
+        assert_ne!(p.interrupt.read(0x00) & sources::TIMER2 as u8, 0);
+        assert_ne!(p.interrupt.read(0x00) & sources::TIMER3 as u8, 0);
+    }
+
+    #[test]
+    fn test_tick_no_interrupts_when_disabled() {
+        let mut p = Peripherals::new();
+
+        // Enable timer 1 with interrupt on overflow
+        p.timer1.write_control(0x01 | 0x02 | 0x04);
+        // Set counter to max
+        p.write(TIMER_BASE, 0xFF);
+        p.write(TIMER_BASE + 1, 0xFF);
+        p.write(TIMER_BASE + 2, 0xFF);
+        p.write(TIMER_BASE + 3, 0xFF);
+
+        // But don't enable the interrupt in the interrupt controller
+        // (enabled = 0 by default)
+
+        // Tick should overflow timer but not report pending
+        let pending = p.tick(2);
+        assert!(!pending);
+        assert!(!p.irq_pending());
+
+        // Status should still be latched
+        assert_ne!(p.interrupt.read(0x00), 0);
+    }
+
+    #[test]
     fn test_fallback_storage() {
         let mut p = Peripherals::new();
         let keys = empty_keys();
@@ -335,5 +561,17 @@ mod tests {
         // Write to unmapped address
         p.write(0x000100, 0xAB);
         assert_eq!(p.read(0x000100, &keys), 0xAB);
+    }
+
+    #[test]
+    fn test_fallback_storage_wraps() {
+        let mut p = Peripherals::new();
+        let keys = empty_keys();
+
+        // Write to address that wraps around fallback storage
+        let addr = Peripherals::FALLBACK_SIZE as u32 + 0x100;
+        p.write(addr, 0xCD);
+        // Should read back at wrapped address
+        assert_eq!(p.read(0x100, &keys), 0xCD);
     }
 }
