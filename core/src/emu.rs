@@ -89,8 +89,10 @@ pub enum StopReason {
     CyclesComplete,
     /// CPU halted (HALT instruction)
     Halted,
+    // TODO: Wire up UnimplementedOpcode when CPU reports unimplemented instructions (Milestone 5+)
     /// Unimplemented opcode encountered
     UnimplementedOpcode(u8),
+    // TODO: Wire up BusFault when Bus reports invalid memory access (Milestone 5+)
     /// Bus fault (invalid memory access)
     BusFault(u32),
 }
@@ -175,13 +177,13 @@ impl Emu {
         while cycles_remaining > 0 {
             // Record PC and peek at opcode before execution
             let pc = self.cpu.pc;
-            let opcode = self.peek_opcode(pc);
+            let (opcode, opcode_len) = self.peek_opcode(pc);
 
             // Execute one instruction
             let cycles_used = self.cpu.step(&mut self.bus);
 
             // Record in history
-            self.history.record(pc, &opcode);
+            self.history.record(pc, &opcode[..opcode_len]);
 
             cycles_remaining -= cycles_used as i32;
             self.total_cycles += cycles_used as u64;
@@ -189,40 +191,42 @@ impl Emu {
             // Check for halt
             if self.cpu.halted {
                 self.last_stop = StopReason::Halted;
-                break;
+                return (self.total_cycles - start_cycles) as u32;
             }
         }
 
-        if cycles_remaining <= 0 {
-            self.last_stop = StopReason::CyclesComplete;
-        }
-
+        self.last_stop = StopReason::CyclesComplete;
         (self.total_cycles - start_cycles) as u32
     }
 
     /// Peek at opcode bytes at address without affecting state
-    fn peek_opcode(&self, addr: u32) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(4);
+    /// Returns (bytes, length) to avoid heap allocation in hot loop
+    fn peek_opcode(&self, addr: u32) -> ([u8; 4], usize) {
+        let mut bytes = [0u8; 4];
         let first = self.bus.peek_byte(addr);
-        bytes.push(first);
+        bytes[0] = first;
 
         // Check for prefix bytes
-        match first {
+        let len = match first {
             0xCB | 0xED => {
-                bytes.push(self.bus.peek_byte(addr.wrapping_add(1)));
+                bytes[1] = self.bus.peek_byte(addr.wrapping_add(1));
+                2
             }
             0xDD | 0xFD => {
                 let second = self.bus.peek_byte(addr.wrapping_add(1));
-                bytes.push(second);
+                bytes[1] = second;
                 if second == 0xCB {
-                    bytes.push(self.bus.peek_byte(addr.wrapping_add(2)));
-                    bytes.push(self.bus.peek_byte(addr.wrapping_add(3)));
+                    bytes[2] = self.bus.peek_byte(addr.wrapping_add(2));
+                    bytes[3] = self.bus.peek_byte(addr.wrapping_add(3));
+                    4
+                } else {
+                    2
                 }
             }
-            _ => {}
-        }
+            _ => 1,
+        };
 
-        bytes
+        (bytes, len)
     }
 
     /// Get framebuffer dimensions
@@ -426,13 +430,8 @@ mod tests {
     #[test]
     fn test_load_rom() {
         let mut emu = Emu::new();
-        // Create a minimal ROM (4MB of 0xFF like erased flash, but with some code at start)
-        let mut rom = vec![0xFFu8; 4 * 1024 * 1024];
-        // Put some NOPs at the start
-        rom[0] = 0x00; // NOP
-        rom[1] = 0x00; // NOP
-        rom[2] = 0x76; // HALT
-
+        // Minimal ROM - flash defaults to 0xFF so we only need the bytes we use
+        let rom = vec![0x00, 0x00, 0x76]; // NOP, NOP, HALT
         assert!(emu.load_rom(&rom).is_ok());
         assert!(emu.rom_loaded);
     }
@@ -464,13 +463,8 @@ mod tests {
     #[test]
     fn test_run_with_rom() {
         let mut emu = Emu::new();
-        // Create ROM with NOPs then HALT
-        let mut rom = vec![0xFFu8; 4 * 1024 * 1024];
-        rom[0] = 0x00; // NOP (4 cycles)
-        rom[1] = 0x00; // NOP (4 cycles)
-        rom[2] = 0x00; // NOP (4 cycles)
-        rom[3] = 0x76; // HALT (4 cycles)
-
+        // Minimal ROM - flash defaults to 0xFF so we only need the bytes we use
+        let rom = vec![0x00, 0x00, 0x00, 0x76]; // NOP, NOP, NOP, HALT
         emu.load_rom(&rom).unwrap();
         let executed = emu.run_cycles(1000);
 
@@ -483,10 +477,8 @@ mod tests {
     #[test]
     fn test_reset() {
         let mut emu = Emu::new();
-        let mut rom = vec![0xFFu8; 4 * 1024 * 1024];
-        rom[0] = 0x00;
-        rom[1] = 0x76;
-
+        // Minimal ROM - flash defaults to 0xFF so we only need the bytes we use
+        let rom = vec![0x00, 0x76]; // NOP, HALT
         emu.load_rom(&rom).unwrap();
         emu.run_cycles(100);
         emu.set_key(1, 1, true);
@@ -500,13 +492,8 @@ mod tests {
     #[test]
     fn test_history() {
         let mut emu = Emu::new();
-        let mut rom = vec![0xFFu8; 4 * 1024 * 1024];
-        // NOP, NOP, NOP, HALT
-        rom[0] = 0x00;
-        rom[1] = 0x00;
-        rom[2] = 0x00;
-        rom[3] = 0x76;
-
+        // Minimal ROM - flash defaults to 0xFF so we only need the bytes we use
+        let rom = vec![0x00, 0x00, 0x00, 0x76]; // NOP, NOP, NOP, HALT
         emu.load_rom(&rom).unwrap();
         emu.run_cycles(100);
 
