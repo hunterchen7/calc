@@ -433,13 +433,25 @@ impl Cpu {
 
     // ========== Address Masking ==========
 
-    /// Mask address based on ADL mode
+    /// Mask address based on ADL mode (applies MBASE in Z80 mode)
+    /// Use for memory operand addresses
     #[inline]
     pub fn mask_addr(&self, addr: u32) -> u32 {
         if self.adl {
             addr & 0xFFFFFF // 24-bit in ADL mode
         } else {
             ((self.mbase as u32) << 16) | (addr & 0xFFFF) // 16-bit with MBASE
+        }
+    }
+
+    /// Wrap PC/SP to stay within address width (no MBASE added)
+    /// Use for PC and SP modifications
+    #[inline]
+    pub fn wrap_pc(&self, addr: u32) -> u32 {
+        if self.adl {
+            addr & 0xFFFFFF // 24-bit in ADL mode
+        } else {
+            addr & 0xFFFF // 16-bit in Z80 mode (no MBASE)
         }
     }
 
@@ -454,8 +466,15 @@ impl Cpu {
     /// Fetch byte at PC and increment PC
     #[inline]
     pub fn fetch_byte(&mut self, bus: &mut Bus) -> u8 {
-        let byte = bus.read_byte(self.pc);
-        self.pc = self.mask_addr(self.pc.wrapping_add(1));
+        // Apply MBASE for actual memory access in Z80 mode
+        let effective_pc = self.mask_addr(self.pc);
+        let byte = bus.read_byte(effective_pc);
+        // PC stays as 16-bit in Z80 mode, 24-bit in ADL mode (no MBASE added)
+        self.pc = if self.adl {
+            self.pc.wrapping_add(1) & 0xFFFFFF
+        } else {
+            self.pc.wrapping_add(1) & 0xFFFF
+        };
         self.r = (self.r & 0x80) | ((self.r.wrapping_add(1)) & 0x7F);
         byte
     }
@@ -468,7 +487,8 @@ impl Cpu {
         lo | (hi << 8)
     }
 
-    /// Fetch 24-bit address at PC (little-endian, for ADL mode)
+    /// Fetch address at PC - 24-bit in ADL mode, 16-bit in Z80 mode
+    /// Returns raw value without MBASE (for PC/SP assignments)
     #[inline]
     pub fn fetch_addr(&mut self, bus: &mut Bus) -> u32 {
         if self.adl {
@@ -477,6 +497,7 @@ impl Cpu {
             let b2 = self.fetch_byte(bus) as u32;
             b0 | (b1 << 8) | (b2 << 16)
         } else {
+            // Z80 mode: just 16-bit, no MBASE (caller applies MBASE if needed for memory access)
             self.fetch_word(bus) as u32
         }
     }
@@ -486,15 +507,15 @@ impl Cpu {
     /// Push a byte onto the stack
     #[inline]
     pub fn push_byte(&mut self, bus: &mut Bus, val: u8) {
-        self.sp = self.mask_addr(self.sp.wrapping_sub(1));
-        bus.write_byte(self.sp, val);
+        self.sp = self.wrap_pc(self.sp.wrapping_sub(1));
+        bus.write_byte(self.mask_addr(self.sp), val);
     }
 
     /// Pop a byte from the stack
     #[inline]
     pub fn pop_byte(&mut self, bus: &mut Bus) -> u8 {
-        let val = bus.read_byte(self.sp);
-        self.sp = self.mask_addr(self.sp.wrapping_add(1));
+        let val = bus.read_byte(self.mask_addr(self.sp));
+        self.sp = self.wrap_pc(self.sp.wrapping_add(1));
         val
     }
 
@@ -812,7 +833,7 @@ impl Cpu {
                         let d = self.fetch_byte(bus) as i8;
                         self.set_b(self.b().wrapping_sub(1));
                         if self.b() != 0 {
-                            self.pc = self.mask_addr((self.pc as i32 + d as i32) as u32);
+                            self.pc = self.wrap_pc((self.pc as i32 + d as i32) as u32);
                             13
                         } else {
                             8
@@ -821,14 +842,14 @@ impl Cpu {
                     3 => {
                         // JR d
                         let d = self.fetch_byte(bus) as i8;
-                        self.pc = self.mask_addr((self.pc as i32 + d as i32) as u32);
+                        self.pc = self.wrap_pc((self.pc as i32 + d as i32) as u32);
                         12
                     }
                     4..=7 => {
                         // JR cc,d
                         let d = self.fetch_byte(bus) as i8;
                         if self.check_cc(y - 4) {
-                            self.pc = self.mask_addr((self.pc as i32 + d as i32) as u32);
+                            self.pc = self.wrap_pc((self.pc as i32 + d as i32) as u32);
                             12
                         } else {
                             7
@@ -873,7 +894,8 @@ impl Cpu {
                     }
                     (2, 0) => {
                         // LD (nn),HL
-                        let nn = self.fetch_addr(bus);
+                        let addr = self.fetch_addr(bus);
+                        let nn = self.mask_addr(addr);
                         bus.write_byte(nn, self.l());
                         bus.write_byte(nn.wrapping_add(1), self.h());
                         if self.adl {
@@ -885,23 +907,27 @@ impl Cpu {
                     }
                     (3, 0) => {
                         // LD (nn),A
-                        let nn = self.fetch_addr(bus);
+                        let addr = self.fetch_addr(bus);
+                        let nn = self.mask_addr(addr);
                         bus.write_byte(nn, self.a);
                         13
                     }
                     (0, 1) => {
                         // LD A,(BC)
-                        self.a = bus.read_byte(self.bc);
+                        let addr = self.mask_addr(self.bc);
+                        self.a = bus.read_byte(addr);
                         7
                     }
                     (1, 1) => {
                         // LD A,(DE)
-                        self.a = bus.read_byte(self.de);
+                        let addr = self.mask_addr(self.de);
+                        self.a = bus.read_byte(addr);
                         7
                     }
                     (2, 1) => {
                         // LD HL,(nn)
-                        let nn = self.fetch_addr(bus);
+                        let addr = self.fetch_addr(bus);
+                        let nn = self.mask_addr(addr);
                         let l = bus.read_byte(nn);
                         let h = bus.read_byte(nn.wrapping_add(1));
                         self.set_l(l);
@@ -916,7 +942,8 @@ impl Cpu {
                     }
                     (3, 1) => {
                         // LD A,(nn)
-                        let nn = self.fetch_addr(bus);
+                        let addr = self.fetch_addr(bus);
+                        let nn = self.mask_addr(addr);
                         self.a = bus.read_byte(nn);
                         13
                     }
@@ -1004,24 +1031,30 @@ impl Cpu {
                         // DAA - Decimal Adjust Accumulator
                         let mut correction: u8 = 0;
                         let mut set_carry = false;
+                        let old_a = self.a;
+                        let old_h = self.flag_h();
+                        let lower_nibble_adjust = old_h || (!self.flag_n() && (old_a & 0x0F) > 9);
 
-                        if self.flag_h() || (!self.flag_n() && (self.a & 0x0F) > 9) {
+                        if lower_nibble_adjust {
                             correction |= 0x06;
                         }
 
-                        if self.flag_c() || (!self.flag_n() && self.a > 0x99) {
+                        if self.flag_c() || (!self.flag_n() && old_a > 0x99) {
                             correction |= 0x60;
                             set_carry = true;
                         }
 
                         if self.flag_n() {
                             self.a = self.a.wrapping_sub(correction);
+                            // After SUB: H set if half-borrow occurred
+                            self.set_flag_h(old_h && (old_a & 0x0F) < 6);
                         } else {
                             self.a = self.a.wrapping_add(correction);
+                            // After ADD: H set if lower nibble carry occurred
+                            self.set_flag_h((old_a & 0x0F) + (correction & 0x0F) > 0x0F);
                         }
 
                         self.set_sz_flags(self.a);
-                        self.set_flag_h(false); // H is always cleared on Z80
                         self.set_flag_pv(Self::parity(self.a));
                         if set_carry {
                             self.set_flag_c(true);
@@ -1167,15 +1200,16 @@ impl Cpu {
                     }
                     4 => {
                         // EX (SP),HL
+                        let sp_addr = self.mask_addr(self.sp);
                         let sp_val = if self.adl {
-                            bus.read_addr24(self.sp)
+                            bus.read_addr24(sp_addr)
                         } else {
-                            bus.read_word(self.sp) as u32
+                            bus.read_word(sp_addr) as u32
                         };
                         if self.adl {
-                            bus.write_addr24(self.sp, self.hl);
+                            bus.write_addr24(sp_addr, self.hl);
                         } else {
-                            bus.write_word(self.sp, self.hl as u16);
+                            bus.write_word(sp_addr, self.hl as u16);
                         }
                         self.hl = sp_val;
                         19
@@ -1626,11 +1660,12 @@ impl Cpu {
         match (y, z) {
             // LDI - Load and increment
             (4, 0) => {
-                let val = bus.read_byte(self.hl);
-                bus.write_byte(self.de, val);
-                self.hl = self.mask_addr(self.hl.wrapping_add(1));
-                self.de = self.mask_addr(self.de.wrapping_add(1));
-                self.bc = self.mask_addr(self.bc.wrapping_sub(1));
+                let val = bus.read_byte(self.mask_addr(self.hl));
+                bus.write_byte(self.mask_addr(self.de), val);
+                self.hl = self.wrap_pc(self.hl.wrapping_add(1));
+                self.de = self.wrap_pc(self.de.wrapping_add(1));
+                // BC is a counter, not an address - don't use mask_addr
+                self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
 
                 self.set_flag_h(false);
                 self.set_flag_n(false);
@@ -1641,11 +1676,12 @@ impl Cpu {
             }
             // LDD - Load and decrement
             (5, 0) => {
-                let val = bus.read_byte(self.hl);
-                bus.write_byte(self.de, val);
-                self.hl = self.mask_addr(self.hl.wrapping_sub(1));
-                self.de = self.mask_addr(self.de.wrapping_sub(1));
-                self.bc = self.mask_addr(self.bc.wrapping_sub(1));
+                let val = bus.read_byte(self.mask_addr(self.hl));
+                bus.write_byte(self.mask_addr(self.de), val);
+                self.hl = self.wrap_pc(self.hl.wrapping_sub(1));
+                self.de = self.wrap_pc(self.de.wrapping_sub(1));
+                // BC is a counter, not an address - don't use mask_addr
+                self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
 
                 self.set_flag_h(false);
                 self.set_flag_n(false);
@@ -1656,20 +1692,20 @@ impl Cpu {
             }
             // LDIR - Load, increment, repeat
             (6, 0) => {
-                let val = bus.read_byte(self.hl);
-                bus.write_byte(self.de, val);
-                self.hl = self.mask_addr(self.hl.wrapping_add(1));
-                self.de = self.mask_addr(self.de.wrapping_add(1));
-                self.bc = self.mask_addr(self.bc.wrapping_sub(1));
+                let val = bus.read_byte(self.mask_addr(self.hl));
+                bus.write_byte(self.mask_addr(self.de), val);
+                self.hl = self.wrap_pc(self.hl.wrapping_add(1));
+                self.de = self.wrap_pc(self.de.wrapping_add(1));
+                self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
 
                 self.set_flag_h(false);
                 self.set_flag_n(false);
-                self.set_flag_pv(false);
+                self.set_flag_pv(self.bc != 0);
                 let n = val.wrapping_add(self.a);
                 self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
 
                 if self.bc != 0 {
-                    self.pc = self.mask_addr(self.pc.wrapping_sub(2));
+                    self.pc = self.wrap_pc(self.pc.wrapping_sub(2));
                     21
                 } else {
                     16
@@ -1677,20 +1713,20 @@ impl Cpu {
             }
             // LDDR - Load, decrement, repeat
             (7, 0) => {
-                let val = bus.read_byte(self.hl);
-                bus.write_byte(self.de, val);
-                self.hl = self.mask_addr(self.hl.wrapping_sub(1));
-                self.de = self.mask_addr(self.de.wrapping_sub(1));
-                self.bc = self.mask_addr(self.bc.wrapping_sub(1));
+                let val = bus.read_byte(self.mask_addr(self.hl));
+                bus.write_byte(self.mask_addr(self.de), val);
+                self.hl = self.wrap_pc(self.hl.wrapping_sub(1));
+                self.de = self.wrap_pc(self.de.wrapping_sub(1));
+                self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
 
                 self.set_flag_h(false);
                 self.set_flag_n(false);
-                self.set_flag_pv(false);
+                self.set_flag_pv(self.bc != 0);
                 let n = val.wrapping_add(self.a);
                 self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
 
                 if self.bc != 0 {
-                    self.pc = self.mask_addr(self.pc.wrapping_sub(2));
+                    self.pc = self.wrap_pc(self.pc.wrapping_sub(2));
                     21
                 } else {
                     16
@@ -1698,10 +1734,11 @@ impl Cpu {
             }
             // CPI - Compare and increment
             (4, 1) => {
-                let val = bus.read_byte(self.hl);
+                let val = bus.read_byte(self.mask_addr(self.hl));
                 let result = self.a.wrapping_sub(val);
-                self.hl = self.mask_addr(self.hl.wrapping_add(1));
-                self.bc = self.mask_addr(self.bc.wrapping_sub(1));
+                self.hl = self.wrap_pc(self.hl.wrapping_add(1));
+                // BC is a counter, not an address
+                self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
 
                 self.set_sz_flags(result);
                 self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
@@ -1714,10 +1751,11 @@ impl Cpu {
             }
             // CPD - Compare and decrement
             (5, 1) => {
-                let val = bus.read_byte(self.hl);
+                let val = bus.read_byte(self.mask_addr(self.hl));
                 let result = self.a.wrapping_sub(val);
-                self.hl = self.mask_addr(self.hl.wrapping_sub(1));
-                self.bc = self.mask_addr(self.bc.wrapping_sub(1));
+                self.hl = self.wrap_pc(self.hl.wrapping_sub(1));
+                // BC is a counter, not an address
+                self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
 
                 self.set_sz_flags(result);
                 self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
@@ -1729,10 +1767,11 @@ impl Cpu {
             }
             // CPIR - Compare, increment, repeat
             (6, 1) => {
-                let val = bus.read_byte(self.hl);
+                let val = bus.read_byte(self.mask_addr(self.hl));
                 let result = self.a.wrapping_sub(val);
-                self.hl = self.mask_addr(self.hl.wrapping_add(1));
-                self.bc = self.mask_addr(self.bc.wrapping_sub(1));
+                self.hl = self.wrap_pc(self.hl.wrapping_add(1));
+                // BC is a counter, not an address
+                self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
 
                 self.set_sz_flags(result);
                 self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
@@ -1742,7 +1781,7 @@ impl Cpu {
                 self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
 
                 if self.bc != 0 && result != 0 {
-                    self.pc = self.mask_addr(self.pc.wrapping_sub(2));
+                    self.pc = self.wrap_pc(self.pc.wrapping_sub(2));
                     21
                 } else {
                     16
@@ -1750,10 +1789,11 @@ impl Cpu {
             }
             // CPDR - Compare, decrement, repeat
             (7, 1) => {
-                let val = bus.read_byte(self.hl);
+                let val = bus.read_byte(self.mask_addr(self.hl));
                 let result = self.a.wrapping_sub(val);
-                self.hl = self.mask_addr(self.hl.wrapping_sub(1));
-                self.bc = self.mask_addr(self.bc.wrapping_sub(1));
+                self.hl = self.wrap_pc(self.hl.wrapping_sub(1));
+                // BC is a counter, not an address
+                self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
 
                 self.set_sz_flags(result);
                 self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
@@ -1763,7 +1803,7 @@ impl Cpu {
                 self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
 
                 if self.bc != 0 && result != 0 {
-                    self.pc = self.mask_addr(self.pc.wrapping_sub(2));
+                    self.pc = self.wrap_pc(self.pc.wrapping_sub(2));
                     21
                 } else {
                     16
@@ -1903,7 +1943,7 @@ impl Cpu {
                         let d = self.fetch_byte(bus) as i8;
                         self.set_b(self.b().wrapping_sub(1));
                         if self.b() != 0 {
-                            self.pc = self.mask_addr((self.pc as i32 + d as i32) as u32);
+                            self.pc = self.wrap_pc((self.pc as i32 + d as i32) as u32);
                             13
                         } else {
                             8
@@ -1912,14 +1952,14 @@ impl Cpu {
                     3 => {
                         // JR d
                         let d = self.fetch_byte(bus) as i8;
-                        self.pc = self.mask_addr((self.pc as i32 + d as i32) as u32);
+                        self.pc = self.wrap_pc((self.pc as i32 + d as i32) as u32);
                         12
                     }
                     4..=7 => {
                         // JR cc,d
                         let d = self.fetch_byte(bus) as i8;
                         if self.check_cc(y - 4) {
-                            self.pc = self.mask_addr((self.pc as i32 + d as i32) as u32);
+                            self.pc = self.wrap_pc((self.pc as i32 + d as i32) as u32);
                             12
                         } else {
                             7
@@ -4874,5 +4914,334 @@ mod tests {
         let ret_hi = bus.peek_byte(0xD001FF);
         let ret_addr = (ret_hi as u32) << 16 | (ret_mid as u32) << 8 | ret_lo as u32;
         assert_eq!(ret_addr, 0x123457, "RST should push 24-bit return address");
+    }
+
+    // ========== Z80 Mode Compatibility Tests ==========
+    // These tests verify backward compatibility with Z80 code (ADL=false)
+
+    /// Helper to set up CPU in Z80 mode with MBASE pointing to RAM
+    fn setup_z80_mode(cpu: &mut Cpu) {
+        cpu.adl = false;
+        cpu.mbase = 0xD0; // RAM starts at 0xD00000
+        cpu.pc = 0x0100;  // Typical Z80 program start
+        cpu.sp = 0xFFFF;  // Top of 64KB space
+    }
+
+    #[test]
+    fn test_z80_mode_jp_uses_mbase() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+        setup_z80_mode(&mut cpu);
+
+        // JP 0x200 (C3 00 02)
+        bus.poke_byte(0xD00100, 0xC3);
+        bus.poke_byte(0xD00101, 0x00);
+        bus.poke_byte(0xD00102, 0x02);
+        cpu.step(&mut bus);
+
+        // Should jump to MBASE:0x0200 = 0xD00200
+        assert_eq!(cpu.pc, 0x0200, "PC should be 16-bit value");
+        // But actual address accessed should include MBASE
+        let effective = cpu.mask_addr(cpu.pc);
+        assert_eq!(effective, 0xD00200, "Effective address should include MBASE");
+    }
+
+    #[test]
+    fn test_z80_mode_call_ret_16bit() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+        setup_z80_mode(&mut cpu);
+
+        cpu.sp = 0x1000;
+
+        // CALL 0x200 (CD 00 02)
+        bus.poke_byte(0xD00100, 0xCD);
+        bus.poke_byte(0xD00101, 0x00);
+        bus.poke_byte(0xD00102, 0x02);
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.pc, 0x0200, "Should jump to 0x0200");
+        assert_eq!(cpu.sp, 0x0FFE, "SP should decrease by 2 in Z80 mode");
+
+        // Check return address is 16-bit (0x0103)
+        let ret_lo = bus.peek_byte(0xD00FFE);
+        let ret_hi = bus.peek_byte(0xD00FFF);
+        let ret_addr = (ret_hi as u16) << 8 | ret_lo as u16;
+        assert_eq!(ret_addr, 0x0103, "Return address should be 16-bit");
+
+        // RET (C9)
+        bus.poke_byte(0xD00200, 0xC9);
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.pc, 0x0103, "Should return to 0x0103");
+        assert_eq!(cpu.sp, 0x1000, "SP should be restored");
+    }
+
+    #[test]
+    fn test_z80_mode_push_pop_16bit() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+        setup_z80_mode(&mut cpu);
+
+        cpu.sp = 0x1000;
+        cpu.bc = 0xABCD; // Only lower 16 bits matter in Z80 mode
+
+        // PUSH BC (C5)
+        bus.poke_byte(0xD00100, 0xC5);
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.sp, 0x0FFE, "SP should decrease by 2");
+        assert_eq!(bus.peek_byte(0xD00FFE), 0xCD, "Low byte");
+        assert_eq!(bus.peek_byte(0xD00FFF), 0xAB, "High byte");
+
+        // POP DE (D1)
+        bus.poke_byte(0xD00101, 0xD1);
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.sp, 0x1000, "SP should be restored");
+        assert_eq!(cpu.de & 0xFFFF, 0xABCD, "DE should have popped value");
+    }
+
+    #[test]
+    fn test_z80_mode_ld_nn_a() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+        setup_z80_mode(&mut cpu);
+
+        cpu.a = 0x42;
+
+        // LD (0x5000),A (32 00 50)
+        bus.poke_byte(0xD00100, 0x32);
+        bus.poke_byte(0xD00101, 0x00);
+        bus.poke_byte(0xD00102, 0x50);
+        cpu.step(&mut bus);
+
+        // Should write to MBASE:0x5000 = 0xD05000
+        assert_eq!(bus.peek_byte(0xD05000), 0x42, "Should write to MBASE+nn");
+    }
+
+    #[test]
+    fn test_z80_mode_ld_a_nn() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+        setup_z80_mode(&mut cpu);
+
+        bus.poke_byte(0xD05000, 0x77);
+
+        // LD A,(0x5000) (3A 00 50)
+        bus.poke_byte(0xD00100, 0x3A);
+        bus.poke_byte(0xD00101, 0x00);
+        bus.poke_byte(0xD00102, 0x50);
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.a, 0x77, "Should read from MBASE+nn");
+    }
+
+    #[test]
+    fn test_z80_mode_ldir_16bit_counters() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+        setup_z80_mode(&mut cpu);
+
+        // Source at 0xD00200, dest at 0xD00300, count = 3
+        cpu.hl = 0x0200;
+        cpu.de = 0x0300;
+        cpu.bc = 0x0003;
+
+        bus.poke_byte(0xD00200, 0x11);
+        bus.poke_byte(0xD00201, 0x22);
+        bus.poke_byte(0xD00202, 0x33);
+
+        // LDIR (ED B0)
+        bus.poke_byte(0xD00100, 0xED);
+        bus.poke_byte(0xD00101, 0xB0);
+
+        // Run until BC = 0
+        while cpu.bc != 0 {
+            cpu.step(&mut bus);
+        }
+
+        // Verify data copied
+        assert_eq!(bus.peek_byte(0xD00300), 0x11);
+        assert_eq!(bus.peek_byte(0xD00301), 0x22);
+        assert_eq!(bus.peek_byte(0xD00302), 0x33);
+
+        // BC should be 0, PV should be 0
+        assert_eq!(cpu.bc, 0);
+        assert!(!cpu.flag_pv(), "PV should be 0 when BC=0");
+
+        // HL and DE should have incremented by 3 (16-bit wrap)
+        assert_eq!(cpu.hl & 0xFFFF, 0x0203);
+        assert_eq!(cpu.de & 0xFFFF, 0x0303);
+    }
+
+    #[test]
+    fn test_z80_mode_jr_relative() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+        setup_z80_mode(&mut cpu);
+
+        // JR +5 (18 05) - should jump from 0x100 to 0x107
+        bus.poke_byte(0xD00100, 0x18);
+        bus.poke_byte(0xD00101, 0x05);
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.pc, 0x0107, "JR should work with 16-bit PC");
+
+        // JR -10 (18 F6) - should jump backward
+        bus.poke_byte(0xD00107, 0x18);
+        bus.poke_byte(0xD00108, 0xF6); // -10 in two's complement
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.pc, 0x00FF, "JR backward should wrap in 16-bit");
+    }
+
+    #[test]
+    fn test_z80_mode_djnz() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+        setup_z80_mode(&mut cpu);
+
+        cpu.set_b(3);
+
+        // DJNZ -2 (10 FE) - loop back to itself
+        bus.poke_byte(0xD00100, 0x10);
+        bus.poke_byte(0xD00101, 0xFE);
+
+        cpu.step(&mut bus);
+        assert_eq!(cpu.b(), 2);
+        assert_eq!(cpu.pc, 0x0100, "Should loop back");
+
+        cpu.step(&mut bus);
+        assert_eq!(cpu.b(), 1);
+        assert_eq!(cpu.pc, 0x0100, "Should loop back");
+
+        cpu.step(&mut bus);
+        assert_eq!(cpu.b(), 0);
+        assert_eq!(cpu.pc, 0x0102, "Should fall through when B=0");
+    }
+
+    #[test]
+    fn test_z80_mode_rst() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+        setup_z80_mode(&mut cpu);
+
+        cpu.sp = 0x1000;
+
+        // RST 38h (FF)
+        bus.poke_byte(0xD00100, 0xFF);
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.pc, 0x0038, "RST should jump to vector");
+        assert_eq!(cpu.sp, 0x0FFE, "SP should decrease by 2");
+
+        // Check 16-bit return address
+        let ret_lo = bus.peek_byte(0xD00FFE);
+        let ret_hi = bus.peek_byte(0xD00FFF);
+        assert_eq!(ret_lo, 0x01);
+        assert_eq!(ret_hi, 0x01);
+    }
+
+    #[test]
+    fn test_z80_mode_ex_sp_hl() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+        setup_z80_mode(&mut cpu);
+
+        cpu.sp = 0x1000;
+        cpu.hl = 0x1234;
+        bus.poke_byte(0xD01000, 0xCD);
+        bus.poke_byte(0xD01001, 0xAB);
+
+        // EX (SP),HL (E3)
+        bus.poke_byte(0xD00100, 0xE3);
+        cpu.step(&mut bus);
+
+        // HL should have old stack value
+        assert_eq!(cpu.hl & 0xFFFF, 0xABCD, "HL should have stack value");
+        // Stack should have old HL
+        assert_eq!(bus.peek_byte(0xD01000), 0x34);
+        assert_eq!(bus.peek_byte(0xD01001), 0x12);
+    }
+
+    #[test]
+    fn test_z80_mode_add_flags() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+        setup_z80_mode(&mut cpu);
+
+        // Test overflow detection uses 8-bit (same as ADL mode for A)
+        cpu.a = 0x7F;
+        cpu.set_b(0x01);
+
+        // ADD A,B (80)
+        bus.poke_byte(0xD00100, 0x80);
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.a, 0x80);
+        assert!(cpu.flag_s(), "Sign should be set");
+        assert!(!cpu.flag_z(), "Zero should be clear");
+        assert!(cpu.flag_pv(), "Overflow: 0x7F + 0x01 = 0x80 overflows");
+        assert!(cpu.flag_h(), "Half-carry: 0xF + 1 = 0x10");
+    }
+
+    #[test]
+    fn test_z80_mode_adc_hl_16bit_overflow() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+        setup_z80_mode(&mut cpu);
+
+        // In Z80 mode, ADC HL uses 16-bit overflow detection
+        cpu.hl = 0x7FFF;
+        cpu.bc = 0x0001;
+        cpu.set_flag_c(false);
+
+        // ADC HL,BC (ED 4A)
+        bus.poke_byte(0xD00100, 0xED);
+        bus.poke_byte(0xD00101, 0x4A);
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.hl & 0xFFFF, 0x8000);
+        assert!(cpu.flag_s(), "Sign bit 15 should be set");
+        assert!(cpu.flag_pv(), "Overflow: 0x7FFF + 1 = 0x8000 overflows in 16-bit");
+    }
+
+    #[test]
+    fn test_z80_mode_sbc_hl_16bit_overflow() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+        setup_z80_mode(&mut cpu);
+
+        // In Z80 mode, SBC HL uses 16-bit overflow detection
+        cpu.hl = 0x8000;
+        cpu.bc = 0x0001;
+        cpu.set_flag_c(false);
+
+        // SBC HL,BC (ED 42)
+        bus.poke_byte(0xD00100, 0xED);
+        bus.poke_byte(0xD00101, 0x42);
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.hl & 0xFFFF, 0x7FFF);
+        assert!(!cpu.flag_s(), "Sign bit 15 should be clear");
+        assert!(cpu.flag_pv(), "Overflow: 0x8000 - 1 = 0x7FFF overflows in 16-bit");
+    }
+
+    #[test]
+    fn test_z80_mode_inc_dec_16bit_no_mbase() {
+        let mut cpu = Cpu::new();
+        let mut bus = Bus::new();
+        setup_z80_mode(&mut cpu);
+
+        // INC/DEC on register pairs should not add MBASE
+        cpu.hl = 0xFFFF;
+
+        // INC HL (23)
+        bus.poke_byte(0xD00100, 0x23);
+        cpu.step(&mut bus);
+
+        // Should wrap to 0x0000, not 0xD00000
+        assert_eq!(cpu.hl & 0xFFFF, 0x0000, "HL should wrap at 16-bit boundary");
     }
 }
