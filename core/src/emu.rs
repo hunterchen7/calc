@@ -242,15 +242,20 @@ impl Emu {
     }
 
     /// Press the ON key - wakes CPU from HALT even with interrupts disabled
-    /// Also raises the ON_KEY interrupt for normal interrupt handling
+    /// Also raises the ON_KEY and WAKE interrupts for normal interrupt handling
     pub fn press_on_key(&mut self) {
         use crate::peripherals::interrupt::sources;
 
         // Set the wake signal - this wakes CPU from HALT regardless of IFF1
         self.cpu.on_key_wake = true;
 
-        // Also raise the ON_KEY interrupt for normal handling
+        // Set ON key in keypad matrix (row 2, col 0)
+        self.bus.set_key(2, 0, true);
+
+        // Raise both ON_KEY and WAKE interrupts
+        // WAKE is the power-on wake signal (bit 19)
         self.bus.ports.interrupt.raise(sources::ON_KEY);
+        self.bus.ports.interrupt.raise(sources::WAKE);
 
         // Set irq_pending if enabled (will be handled on next step if IFF1 is set)
         if self.bus.ports.irq_pending() {
@@ -262,8 +267,20 @@ impl Emu {
     pub fn release_on_key(&mut self) {
         use crate::peripherals::interrupt::sources;
 
-        // Clear the raw ON_KEY state (source inactive)
+        // Clear ON key in keypad matrix
+        self.bus.set_key(2, 0, false);
+
+        // Clear the raw ON_KEY and WAKE state (source inactive)
         self.bus.ports.interrupt.clear_raw(sources::ON_KEY);
+        self.bus.ports.interrupt.clear_raw(sources::WAKE);
+    }
+
+    /// Simulate initial power-on sequence
+    /// Call this after loading ROM but before run_cycles to simulate
+    /// the calculator being turned on via the ON key
+    pub fn power_on(&mut self) {
+        // Simulate the ON key being pressed (this is what turns on the calculator)
+        self.press_on_key();
     }
 
     /// Render the current VRAM contents to the framebuffer
@@ -321,6 +338,11 @@ impl Emu {
     /// Get current PC
     pub fn pc(&self) -> u32 {
         self.cpu.pc
+    }
+
+    /// Check if CPU is halted
+    pub fn is_halted(&self) -> bool {
+        self.cpu.halted
     }
 
     /// Get total cycles executed

@@ -87,7 +87,7 @@ impl ControlPorts {
         Self {
             power: 0x00,
             cpu_speed: speed::MHZ_48, // TI-84 CE runs at 48 MHz
-            battery_status: 0x00,     // Battery charged/OK
+            battery_status: 0x0B,     // Battery fully charged (state 11 in CEmu)
             device_type: 0x00,        // Standard device
             control_flags: 0x00,
             unlock_status: 0x00,
@@ -112,7 +112,11 @@ impl ControlPorts {
     /// addr is offset from 0xE00000 (0x00-0xFF)
     pub fn read(&self, addr: u32) -> u8 {
         match addr {
-            regs::POWER => self.power,
+            regs::POWER => {
+                // Bit 4 is a read-only "power stable" indicator
+                // Always return it as set to indicate power is ready
+                self.power | 0x10
+            }
             regs::CPU_SPEED => self.cpu_speed,
             regs::BATTERY_STATUS => self.battery_status,
             regs::DEVICE_TYPE => self.device_type,
@@ -151,7 +155,11 @@ impl ControlPorts {
     /// addr is offset from 0xE00000 (0x00-0xFF)
     pub fn write(&mut self, addr: u32, value: u8) {
         match addr {
-            regs::POWER => self.power = value,
+            regs::POWER => {
+                // Bit 4 is read-only (power stable indicator)
+                // Only bits 0, 1, 7 are writable (0x83 mask)
+                self.power = value & 0x83;
+            }
             regs::CPU_SPEED => self.cpu_speed = value & 0x03,
             regs::BATTERY_STATUS => {} // Read-only
             regs::DEVICE_TYPE => {}    // Read-only
@@ -240,12 +248,13 @@ mod tests {
     fn test_reset() {
         let mut ctrl = ControlPorts::new();
         ctrl.write(regs::CPU_SPEED, speed::MHZ_6);
-        ctrl.write(regs::POWER, 0x10);
+        ctrl.write(regs::POWER, 0x83); // Write allowed bits
         ctrl.write(0x20, 0x12);
 
         ctrl.reset();
         assert_eq!(ctrl.cpu_speed(), speed::MHZ_48);
-        assert_eq!(ctrl.read(regs::POWER), 0);
+        // Power port reads 0x10 (bit 4 always set = power stable)
+        assert_eq!(ctrl.read(regs::POWER), 0x10);
         assert_eq!(ctrl.protected_start, 0);
     }
 

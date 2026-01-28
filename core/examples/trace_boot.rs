@@ -40,8 +40,30 @@ fn main() {
 
     println!("\nTracing boot sequence...\n");
 
-    // Run more cycles to see what happens
-    let executed = emu.run_cycles(10000);
+    // Run until we hit HALT
+    let executed1 = emu.run_cycles(10000);
+    println!("Phase 1: {} cycles, halted={}", executed1, emu.is_halted());
+
+    // Keep waking from HALT until we reach a different location
+    let mut wake_count = 0;
+    let initial_halt_pc = emu.pc();
+    while emu.is_halted() && wake_count < 1000 {
+        wake_count += 1;
+        emu.press_on_key();
+        emu.run_cycles(100000);
+
+        // Check if we've moved to a different location
+        if emu.pc() != initial_halt_pc && emu.pc() != initial_halt_pc - 1 {
+            println!("After {} wakes: PC moved from {:06X} to {:06X}!",
+                     wake_count, initial_halt_pc, emu.pc());
+            break;
+        }
+    }
+    if wake_count > 0 {
+        println!("Woke {} times, final PC={:06X}, halted={}", wake_count, emu.pc(), emu.is_halted());
+    }
+
+    let executed = emu.total_cycles();
 
     println!("Cycles executed: {}", executed);
     println!("Stop reason: {:?}", emu.last_stop_reason());

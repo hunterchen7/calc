@@ -2,14 +2,16 @@
 //!
 //! Memory-mapped at 0xF00000 (port offset 0x100000 from 0xE00000)
 //!
-//! The controller has 22 interrupt sources. Key sources:
+//! The controller has 22 interrupt sources. Key sources (from CEmu):
 //! - Bit 0: ON key
 //! - Bit 1: Timer 1
 //! - Bit 2: Timer 2
 //! - Bit 3: Timer 3
-//! - Bit 4: (reserved)
-//! - Bit 5: Keypad (any key in scan mode)
-//! - Bit 10: LCD (VBLANK)
+//! - Bit 4: OS Timer
+//! - Bit 10: Keypad (any key in scan mode)
+//! - Bit 11: LCD (VBLANK)
+//! - Bit 15: Power
+//! - Bit 19: Wake (power-on wake signal)
 
 /// Interrupt source bit masks
 pub mod sources {
@@ -17,8 +19,11 @@ pub mod sources {
     pub const TIMER1: u32 = 1 << 1;
     pub const TIMER2: u32 = 1 << 2;
     pub const TIMER3: u32 = 1 << 3;
-    pub const KEYPAD: u32 = 1 << 5;
-    pub const LCD: u32 = 1 << 10;
+    pub const OSTIMER: u32 = 1 << 4;
+    pub const KEYPAD: u32 = 1 << 10;
+    pub const LCD: u32 = 1 << 11;
+    pub const PWR: u32 = 1 << 15;
+    pub const WAKE: u32 = 1 << 19;
 }
 
 /// Register offsets within the interrupt controller
@@ -228,12 +233,12 @@ mod tests {
     fn test_multi_byte_status() {
         let mut ic = InterruptController::new();
 
-        // Raise LCD interrupt (bit 10 - in byte 1)
+        // Raise LCD interrupt (bit 11 - in byte 1)
         ic.raise(sources::LCD);
 
         // Read byte 0 should be 0
         assert_eq!(ic.read(regs::STATUS), 0);
-        // Read byte 1 should have bit 2 set (bit 10 >> 8 = bit 2)
+        // Read byte 1 should have bit 3 set (bit 11 >> 8 = bit 3)
         assert_eq!(ic.read(regs::STATUS + 1), (sources::LCD >> 8) as u8);
     }
 

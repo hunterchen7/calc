@@ -428,9 +428,9 @@ mod tests {
         p.write(LCD_BASE + 0x10, 0x01); // ENABLE
         p.write(LCD_BASE + 0x14, 0x01); // Enable VBLANK interrupt mask
 
-        // Enable LCD interrupt in interrupt controller (bit 10)
+        // Enable LCD interrupt in interrupt controller (bit 11 - in byte 1)
         p.write(INT_BASE + 0x04, 0x00); // Low byte
-        p.write(INT_BASE + 0x05, (sources::LCD >> 8) as u8); // High byte (bit 10)
+        p.write(INT_BASE + 0x05, (sources::LCD >> 8) as u8); // High byte (bit 11)
 
         // Tick for a full frame (800_000 cycles at 48MHz/60Hz)
         let pending = p.tick(800_000);
@@ -446,8 +446,8 @@ mod tests {
         p.write(KEYPAD_BASE + 0x00, 0x02); // CONTINUOUS mode
         p.write(KEYPAD_BASE + 0x0C, 0x04); // Enable any key interrupt
 
-        // Enable keypad interrupt in interrupt controller
-        p.write(INT_BASE + 0x04, sources::KEYPAD as u8);
+        // Enable keypad interrupt in interrupt controller (bit 10 - in byte 1)
+        p.write(INT_BASE + 0x05, (sources::KEYPAD >> 8) as u8);
 
         // Press a key via internal key_state
         p.set_key(0, 0, true);
