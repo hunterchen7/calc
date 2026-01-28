@@ -76,8 +76,9 @@ impl FlashController {
     }
 
     /// Get the total wait cycles (base 6 + configured wait states)
+    /// Uses saturating addition to prevent overflow with large wait_states values
     pub fn total_wait_cycles(&self) -> u8 {
-        6 + self.wait_states
+        6u8.saturating_add(self.wait_states)
     }
 
     /// Get the map selection value
@@ -86,7 +87,8 @@ impl FlashController {
     }
 
     /// Calculate the mapped flash size in bytes
-    /// Formula: 0x10000 << map_select (capped at map < 8)
+    /// Formula: 0x10000 << map_select for map_select 0-7
+    /// Values >= 8 fall back to map_select=0 (returns 0x10000)
     pub fn mapped_bytes(&self) -> u32 {
         let map = self.map_select & 0x0F;
         if self.enable == 0 || self.size_config > 0x3F {
@@ -237,6 +239,16 @@ mod tests {
         assert_eq!(flash.read(regs::WAIT_STATES), 0x04);
         assert_eq!(flash.wait_states(), 0x04);
         assert_eq!(flash.total_wait_cycles(), 10); // 6 + 4
+    }
+
+    #[test]
+    fn test_wait_states_saturates() {
+        let mut flash = FlashController::new();
+
+        // Writing 0xFF should saturate total_wait_cycles to 255
+        flash.write(regs::WAIT_STATES, 0xFF);
+        assert_eq!(flash.wait_states(), 0xFF);
+        assert_eq!(flash.total_wait_cycles(), 255); // saturates at u8::MAX
     }
 
     #[test]
