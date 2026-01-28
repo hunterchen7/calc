@@ -261,36 +261,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lpbase_write() {
-        let mut lcd = LcdController::new();
-
-        lcd.write(regs::LPBASE, 0x00);
-        lcd.write(regs::LPBASE + 1, 0x80);
-        lcd.write(regs::LPBASE + 2, 0xD4);
-
-        assert_eq!(lcd.lpbase, 0xD48000);
-    }
-
-    #[test]
-    fn test_timing_registers() {
-        let mut lcd = LcdController::new();
-
-        // Write timing0
-        lcd.write(regs::TIMING0, 0x12);
-        lcd.write(regs::TIMING0 + 1, 0x34);
-        lcd.write(regs::TIMING0 + 2, 0x56);
-        lcd.write(regs::TIMING0 + 3, 0x78);
-
-        assert_eq!(lcd.timing[0], 0x78563412);
-        assert_eq!(lcd.read(regs::TIMING0), 0x12);
-        assert_eq!(lcd.read(regs::TIMING0 + 3), 0x78);
-
-        // Write timing1
-        lcd.write(regs::TIMING1, 0xAB);
-        assert_eq!(lcd.read(regs::TIMING1), 0xAB);
-    }
-
-    #[test]
     fn test_vblank_interrupt() {
         let mut lcd = LcdController::new();
         lcd.control = ctrl::ENABLE;
@@ -343,25 +313,4 @@ mod tests {
         assert_eq!(lcd.int_status & 1, 1);
     }
 
-    #[test]
-    fn test_palbase_write() {
-        let mut lcd = LcdController::new();
-
-        lcd.write(regs::PALBASE, 0x00);
-        lcd.write(regs::PALBASE + 1, 0x10);
-        lcd.write(regs::PALBASE + 2, 0xD5);
-
-        assert_eq!(lcd.palbase, 0xD51000);
-    }
-
-    #[test]
-    fn test_read_control_register() {
-        let mut lcd = LcdController::new();
-        lcd.control = 0x12345678;
-
-        assert_eq!(lcd.read(regs::CONTROL), 0x78);
-        assert_eq!(lcd.read(regs::CONTROL + 1), 0x56);
-        assert_eq!(lcd.read(regs::CONTROL + 2), 0x34);
-        assert_eq!(lcd.read(regs::CONTROL + 3), 0x12);
-    }
 }

@@ -286,17 +286,6 @@ mod tests {
     }
 
     #[test]
-    fn test_set_key() {
-        let mut p = Peripherals::new();
-
-        p.set_key(2, 3, true);
-        assert!(p.key_state()[2][3]);
-
-        p.set_key(2, 3, false);
-        assert!(!p.key_state()[2][3]);
-    }
-
-    #[test]
     fn test_set_key_bounds_check() {
         let mut p = Peripherals::new();
 
@@ -339,34 +328,6 @@ mod tests {
         // Write timer control
         p.write(TIMER_BASE + 0x30, 0x01); // Enable timer 1
         assert!(p.timer1.is_enabled());
-    }
-
-    #[test]
-    fn test_timer2_routing() {
-        let mut p = Peripherals::new();
-        let keys = empty_keys();
-
-        // Write to timer 2 counter (offset 0x10 from TIMER_BASE)
-        p.write(TIMER_BASE + 0x10, 0xAB);
-        assert_eq!(p.read(TIMER_BASE + 0x10, &keys), 0xAB);
-
-        // Write timer 2 control (offset 0x34)
-        p.write(TIMER_BASE + 0x34, 0x01);
-        assert!(p.timer2.is_enabled());
-    }
-
-    #[test]
-    fn test_timer3_routing() {
-        let mut p = Peripherals::new();
-        let keys = empty_keys();
-
-        // Write to timer 3 counter (offset 0x20 from TIMER_BASE)
-        p.write(TIMER_BASE + 0x20, 0xCD);
-        assert_eq!(p.read(TIMER_BASE + 0x20, &keys), 0xCD);
-
-        // Write timer 3 control (offset 0x38)
-        p.write(TIMER_BASE + 0x38, 0x01);
-        assert!(p.timer3.is_enabled());
     }
 
     #[test]

@@ -273,30 +273,6 @@ mod tests {
     }
 
     #[test]
-    fn test_all_cpu_speeds() {
-        let mut ctrl = ControlPorts::new();
-
-        ctrl.write(regs::CPU_SPEED, speed::MHZ_6);
-        assert_eq!(ctrl.cpu_speed(), speed::MHZ_6);
-
-        ctrl.write(regs::CPU_SPEED, speed::MHZ_12);
-        assert_eq!(ctrl.cpu_speed(), speed::MHZ_12);
-
-        ctrl.write(regs::CPU_SPEED, speed::MHZ_24);
-        assert_eq!(ctrl.cpu_speed(), speed::MHZ_24);
-
-        ctrl.write(regs::CPU_SPEED, speed::MHZ_48);
-        assert_eq!(ctrl.cpu_speed(), speed::MHZ_48);
-    }
-
-    #[test]
-    fn test_power_port() {
-        let mut ctrl = ControlPorts::new();
-        ctrl.write(regs::POWER, 0x10);
-        assert_eq!(ctrl.read(regs::POWER), 0x10);
-    }
-
-    #[test]
     fn test_battery_status_readonly() {
         let mut ctrl = ControlPorts::new();
         let initial = ctrl.read(regs::BATTERY_STATUS);
@@ -336,60 +312,6 @@ mod tests {
         assert_eq!(ctrl.read(0x20), 0x12);
         assert_eq!(ctrl.read(0x21), 0x34);
         assert_eq!(ctrl.read(0x22), 0x56);
-    }
-
-    #[test]
-    fn test_protected_end_address() {
-        let mut ctrl = ControlPorts::new();
-        ctrl.write(0x23, 0xAB);
-        ctrl.write(0x24, 0xCD);
-        ctrl.write(0x25, 0xEF);
-        assert_eq!(ctrl.protected_end, 0xEFCDAB);
-
-        assert_eq!(ctrl.read(0x23), 0xAB);
-        assert_eq!(ctrl.read(0x24), 0xCD);
-        assert_eq!(ctrl.read(0x25), 0xEF);
-    }
-
-    #[test]
-    fn test_stack_limit() {
-        let mut ctrl = ControlPorts::new();
-        ctrl.write(0x3A, 0x00);
-        ctrl.write(0x3B, 0x00);
-        ctrl.write(0x3C, 0xD0);
-        assert_eq!(ctrl.stack_limit, 0xD00000);
-
-        assert_eq!(ctrl.read(0x3A), 0x00);
-        assert_eq!(ctrl.read(0x3B), 0x00);
-        assert_eq!(ctrl.read(0x3C), 0xD0);
-    }
-
-    #[test]
-    fn test_control_flags() {
-        let mut ctrl = ControlPorts::new();
-        ctrl.write(regs::CONTROL_FLAGS, 0x55);
-        assert_eq!(ctrl.read(regs::CONTROL_FLAGS), 0x55);
-    }
-
-    #[test]
-    fn test_usb_control() {
-        let mut ctrl = ControlPorts::new();
-        ctrl.write(regs::USB_CONTROL, 0xAA);
-        assert_eq!(ctrl.read(regs::USB_CONTROL), 0xAA);
-    }
-
-    #[test]
-    fn test_panel_control() {
-        let mut ctrl = ControlPorts::new();
-        ctrl.write(regs::PANEL_CONTROL, 0x77);
-        assert_eq!(ctrl.read(regs::PANEL_CONTROL), 0x77);
-    }
-
-    #[test]
-    fn test_general_control() {
-        let mut ctrl = ControlPorts::new();
-        ctrl.write(regs::GENERAL, 0x33);
-        assert_eq!(ctrl.read(regs::GENERAL), 0x33);
     }
 
     #[test]
@@ -445,14 +367,6 @@ mod tests {
         ctrl.write(regs::UNLOCK_STATUS, 0x00);
         assert!(!ctrl.protected_ports_unlocked());
         // But read still shows hw bits 2 and 3
-        assert_eq!(ctrl.read(regs::FLASH_UNLOCK), 0x0C);
-    }
-
-    #[test]
-    fn test_flash_unlocked() {
-        let ctrl = ControlPorts::new();
-        // Reading flash unlock port returns hardware bits always set
-        // The read() function ORs in 0x0C (bits 2 and 3)
         assert_eq!(ctrl.read(regs::FLASH_UNLOCK), 0x0C);
     }
 

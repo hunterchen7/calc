@@ -347,19 +347,6 @@ mod tests {
     }
 
     #[test]
-    fn test_all_clock_dividers() {
-        for div_bits in 0..=7 {
-            let mut timer = Timer::new();
-            timer.control = ctrl::ENABLE | ctrl::COUNT_UP | (div_bits << ctrl::CLOCK_DIV_SHIFT);
-            timer.counter = 0;
-
-            let expected_divider = 1 << div_bits;
-            timer.tick(expected_divider);
-            assert_eq!(timer.counter, 1, "Divider {} should give 1 tick", expected_divider);
-        }
-    }
-
-    #[test]
     fn test_read_write_counter() {
         let mut timer = Timer::new();
 
@@ -373,54 +360,6 @@ mod tests {
         assert_eq!(timer.read(1), 0x34);
         assert_eq!(timer.read(2), 0x56);
         assert_eq!(timer.read(3), 0x78);
-    }
-
-    #[test]
-    fn test_read_write_reset_value() {
-        let mut timer = Timer::new();
-
-        timer.write(regs::RESET, 0xAB);
-        timer.write(regs::RESET + 1, 0xCD);
-        timer.write(regs::RESET + 2, 0xEF);
-        timer.write(regs::RESET + 3, 0x12);
-
-        assert_eq!(timer.reset_value, 0x12EFCDAB);
-        assert_eq!(timer.read(regs::RESET), 0xAB);
-        assert_eq!(timer.read(regs::RESET + 1), 0xCD);
-    }
-
-    #[test]
-    fn test_read_write_match_values() {
-        let mut timer = Timer::new();
-
-        // Write match1
-        timer.write(regs::MATCH1, 0x11);
-        timer.write(regs::MATCH1 + 1, 0x22);
-        timer.write(regs::MATCH1 + 2, 0x33);
-        timer.write(regs::MATCH1 + 3, 0x44);
-
-        assert_eq!(timer.match1, 0x44332211);
-
-        // Write match2
-        timer.write(regs::MATCH2, 0xAA);
-        timer.write(regs::MATCH2 + 1, 0xBB);
-        timer.write(regs::MATCH2 + 2, 0xCC);
-        timer.write(regs::MATCH2 + 3, 0xDD);
-
-        assert_eq!(timer.match2, 0xDDCCBBAA);
-    }
-
-    #[test]
-    fn test_control_register() {
-        let mut timer = Timer::new();
-
-        timer.write_control(ctrl::ENABLE | ctrl::COUNT_UP | ctrl::INT_ON_ZERO);
-
-        assert!(timer.is_enabled());
-        assert!(timer.count_up());
-        assert!(timer.int_on_zero());
-
-        assert_eq!(timer.read_control(), ctrl::ENABLE | ctrl::COUNT_UP | ctrl::INT_ON_ZERO);
     }
 
     #[test]

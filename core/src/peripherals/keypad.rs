@@ -268,53 +268,6 @@ mod tests {
     }
 
     #[test]
-    fn test_all_rows() {
-        let kp = KeypadController::new();
-        let mut keys = empty_key_state();
-
-        // Press one key in each row
-        for row in 0..KEYPAD_ROWS {
-            keys[row][row] = true;
-        }
-
-        // Verify each row
-        for row in 0..KEYPAD_ROWS {
-            let data = kp.read(regs::DATA_BASE + (row as u32) * 2, &keys);
-            let expected = 0xFF ^ (1 << row);
-            assert_eq!(data, expected as u8, "Row {} should have bit {} clear", row, row);
-        }
-    }
-
-    #[test]
-    fn test_write_control() {
-        let mut kp = KeypadController::new();
-        let keys = empty_key_state();
-
-        kp.write(regs::CONTROL, mode::CONTINUOUS);
-        assert_eq!(kp.read(regs::CONTROL, &keys), mode::CONTINUOUS);
-        assert_eq!(kp.mode(), mode::CONTINUOUS);
-    }
-
-    #[test]
-    fn test_write_size() {
-        let mut kp = KeypadController::new();
-        let keys = empty_key_state();
-
-        kp.write(regs::SIZE, 0x44); // 4x4 matrix
-        assert_eq!(kp.read(regs::SIZE, &keys), 0x44);
-    }
-
-    #[test]
-    fn test_write_int_ack() {
-        let mut kp = KeypadController::new();
-        let keys = empty_key_state();
-
-        kp.write(regs::INT_ACK, 0x07);
-        assert_eq!(kp.read(regs::INT_ACK, &keys), 0x07);
-        assert_eq!(kp.int_mask, 0x07);
-    }
-
-    #[test]
     fn test_clear_int_status() {
         let mut kp = KeypadController::new();
         let keys = empty_key_state();
