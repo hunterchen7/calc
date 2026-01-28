@@ -313,4 +313,35 @@ mod tests {
         assert_eq!(lcd.int_status & 1, 1);
     }
 
+    #[test]
+    fn test_vblank_exact_boundary() {
+        let mut lcd = LcdController::new();
+        lcd.control = ctrl::ENABLE;
+        lcd.int_mask = 1;
+
+        // Tick to exactly 1 cycle before frame end
+        let irq = lcd.tick(CYCLES_PER_FRAME - 1);
+        assert!(!irq);
+        assert_eq!(lcd.frame_cycles, CYCLES_PER_FRAME - 1);
+
+        // One more cycle completes the frame
+        let irq = lcd.tick(1);
+        assert!(irq);
+        assert_eq!(lcd.frame_cycles, 0); // Reset after frame
+    }
+
+    #[test]
+    fn test_tick_larger_than_frame() {
+        let mut lcd = LcdController::new();
+        lcd.control = ctrl::ENABLE;
+        lcd.int_mask = 1;
+
+        // Tick more than one frame at once - only one interrupt per tick
+        let irq = lcd.tick(CYCLES_PER_FRAME * 2 + 100);
+        assert!(irq);
+        // frame_cycles should be the remainder after one CYCLES_PER_FRAME subtracted
+        // (CYCLES_PER_FRAME * 2 + 100) - CYCLES_PER_FRAME = CYCLES_PER_FRAME + 100
+        assert_eq!(lcd.frame_cycles, CYCLES_PER_FRAME + 100);
+    }
+
 }
