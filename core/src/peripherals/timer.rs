@@ -125,8 +125,10 @@ impl Timer {
             self.counter = new_val;
 
             if overflow {
+                // The wrapped value (new_val) represents ticks past the overflow point
+                // After reload, continue counting up from reset_value
                 if self.use_reset() {
-                    self.counter = self.reset_value;
+                    self.counter = self.reset_value.wrapping_add(new_val);
                 }
                 if self.int_on_zero() {
                     interrupt = true;
@@ -404,8 +406,23 @@ mod tests {
         timer.counter = 0xFFFFFFFE;
         timer.reset_value = 0x1000;
 
+        // Trace: 0xFFFFFFFE → 0xFFFFFFFF → 0x00000000 (overflow, reload to 0x1000) → 0x1001
+        // 2 ticks to overflow, then reload to reset_value, then 1 more tick
+        // Expected: 0x1000 + 1 = 0x1001
         timer.tick(3);
-        // Should have overflowed and reset to 0x1000
+        assert_eq!(timer.counter, 0x1001);
+    }
+
+    #[test]
+    fn test_overflow_exact_boundary() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE | ctrl::COUNT_UP | ctrl::USE_RESET;
+        timer.counter = 0xFFFFFFFE;
+        timer.reset_value = 0x1000;
+
+        // Trace: 0xFFFFFFFE → 0xFFFFFFFF → 0x00000000 (overflow, reload to 0x1000)
+        // Exactly 2 ticks to overflow, wrapped value is 0, so counter = reset_value + 0
+        timer.tick(2);
         assert_eq!(timer.counter, 0x1000);
     }
 }

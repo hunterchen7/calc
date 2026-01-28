@@ -12,6 +12,7 @@ Project-specific guidelines for Claude Code when working on this TI-84 Plus CE e
 
 - In Z80 mode tests, remember to set `cpu.mbase = 0x00` when poking bytes at address 0, since the default MBASE (0xD0) causes fetches from 0xD00000
 - Use minimal ROM buffers in tests - flash defaults to 0xFF, so only include the bytes actually needed
+- **Always assert exact expected values** - When testing arithmetic, counters, or state transitions, calculate and assert the specific expected result, not just a range or property. Weak assertions like `assert!(x < 1000)` can pass for both correct and buggy implementations. Instead, trace through the expected behavior step-by-step and use `assert_eq!(x, 995)`.
 
 ## Architecture
 
