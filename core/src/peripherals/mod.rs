@@ -15,6 +15,7 @@ pub mod interrupt;
 pub mod keypad;
 pub mod lcd;
 pub mod rtc;
+pub mod sha256;
 pub mod timer;
 pub mod watchdog;
 
@@ -24,6 +25,7 @@ pub use interrupt::InterruptController;
 pub use keypad::{KeypadController, KEYPAD_COLS, KEYPAD_ROWS};
 pub use lcd::{LcdController, LCD_HEIGHT, LCD_WIDTH};
 pub use rtc::RtcController;
+pub use sha256::Sha256Controller;
 pub use timer::Timer;
 pub use watchdog::WatchdogController;
 
@@ -34,6 +36,8 @@ const CONTROL_BASE: u32 = 0x000000; // 0xE00000
 const CONTROL_END: u32 = 0x000100;
 const FLASH_BASE: u32 = 0x010000; // 0xE10000
 const FLASH_END: u32 = 0x010100;
+const SHA256_BASE: u32 = 0x020000; // 0xE20000
+const SHA256_END: u32 = 0x020100;
 const CONTROL_ALT_BASE: u32 = 0x1F0000; // 0xFF0000 (accessed via OUT0/IN0)
 const CONTROL_ALT_END: u32 = 0x1F0100;
 const LCD_BASE: u32 = 0x030000; // 0xE30000
@@ -72,6 +76,8 @@ pub struct Peripherals {
     pub watchdog: WatchdogController,
     /// RTC controller
     pub rtc: RtcController,
+    /// SHA256 accelerator
+    pub sha256: Sha256Controller,
     /// Fallback register storage for unmapped ports
     fallback: Vec<u8>,
     /// Keypad state (updated by Emu)
@@ -106,6 +112,7 @@ impl Peripherals {
             keypad: KeypadController::new(),
             watchdog: WatchdogController::new(),
             rtc: RtcController::new(),
+            sha256: Sha256Controller::new(),
             fallback: vec![0x00; Self::FALLBACK_SIZE],
             key_state: [[false; KEYPAD_COLS]; KEYPAD_ROWS],
             os_timer_state: false,
@@ -137,6 +144,7 @@ impl Peripherals {
         self.keypad.reset();
         self.watchdog.reset();
         self.rtc.reset();
+        self.sha256.reset();
         self.fallback.fill(0x00);
         self.key_state = [[false; KEYPAD_COLS]; KEYPAD_ROWS];
         self.os_timer_state = false;
@@ -153,6 +161,9 @@ impl Peripherals {
 
             // Flash Controller (0xE10000 - 0xE100FF)
             a if a >= FLASH_BASE && a < FLASH_END => self.flash.read(a - FLASH_BASE),
+
+            // SHA256 Accelerator (0xE20000 - 0xE200FF)
+            a if a >= SHA256_BASE && a < SHA256_END => self.sha256.read(a - SHA256_BASE),
 
             // Control Ports alternate (0xFF0000 - 0xFF00FF, via OUT0/IN0)
             a if a >= CONTROL_ALT_BASE && a < CONTROL_ALT_END => {
@@ -215,6 +226,9 @@ impl Peripherals {
 
             // Flash Controller (0xE10000 - 0xE100FF)
             a if a >= FLASH_BASE && a < FLASH_END => self.flash.write(a - FLASH_BASE, value),
+
+            // SHA256 Accelerator (0xE20000 - 0xE200FF)
+            a if a >= SHA256_BASE && a < SHA256_END => self.sha256.write(a - SHA256_BASE, value),
 
             // Control Ports alternate (0xFF0000 - 0xFF00FF, via OUT0/IN0)
             a if a >= CONTROL_ALT_BASE && a < CONTROL_ALT_END => {

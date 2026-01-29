@@ -17,6 +17,7 @@ Project-specific guidelines for Claude Code when working on this TI-84 Plus CE e
 
 ## Workflow
 
+- **Minimize Grep tool usage** - Prefer Read tool with specific line ranges when possible, as Grep requires manual approval. Use Read to examine specific file sections rather than searching.
 - **Update milestones when completing features** - After implementing a feature from [docs/milestones.md](docs/milestones.md), mark it as complete (`[x]`) and update the test count and status section.
 - **Document interesting findings** - When discovering esoteric behavior or surprising implementation details, add them to [docs/findings.md](docs/findings.md). This includes:
   - Hardware quirks (timing, undocumented registers, differences from standard Z80)
