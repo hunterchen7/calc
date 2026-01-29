@@ -10,11 +10,53 @@ At step 699,900, our emulator completes SPI transfers too fast, causing the ROM'
 
 | Metric | Value |
 |--------|-------|
-| Instructions matched | 699,900 out of 1,000,000 |
-| First PC divergence | Step 699,900 |
-| Root cause | SPI STATUS register returns different tfve (TX FIFO valid entries) |
-| CEmu behavior at divergence | tfve=2 (2 pending transfers) |
-| Our behavior at divergence | tfve=0 (all transfers complete) |
+| Instructions matched | **3,216,456** out of 10,000,000 |
+| First PC divergence | Step 3,216,456 |
+| Root cause | RTC load status timing (scheduler-dependent) |
+| CEmu behavior at divergence | Load partially complete (0xE8) |
+| Our behavior at divergence | Load still pending (0xF8) |
+
+### Update (2026-01-29)
+
+**Progress:** SPI timing is now close to CEmu. The first loop at 0x005BA9 and the transfer-active loop at 0x005BB0 both match, and divergence moved forward.
+
+| Metric | Value |
+|--------|-------|
+| Instructions matched | 702,600 out of 1,000,000 |
+| First PC divergence | Step 702,600 |
+| Divergence location | CEmu PC=000F73, Ours PC=000F6B |
+
+**Key fixes applied:**
+- Corrected SPI FIFO depth to 16 (matches CEmu).
+- Implemented RX-only transfers when `CR0[11]` (FLASH) is set and `CR2[7]` (RX enable) is on, even if TX FIFO is empty.
+- Added RX FIFO increment on transfer completion.
+- Kept SPI timing cycle-based with 24 MHz tick conversion.
+
+**Remaining mismatch:** A small phase difference during the RX-only transfer loop was fixed by using `divider` (not `divider+1`) for RX-only transfer timing. This aligns the STATUS bit 2 (transfer active) loop with CEmu.
+
+### Update (2026-01-29, later)
+
+**Progress:** Instruction parity now matches CEmu through **1,000,000 steps** (only remaining mismatch is CEmu trace output tail text, not CPU state).
+
+**Key fixes beyond SPI:**
+- Control port 0x05 writes are masked to 0x1F (bit 5 was leaking into reads).
+- Flash command emulation for sector erase (AA 55 80 AA 55 30) returns 0x80 for status reads.
+- BIT and SBC/ADC HL,rr preserve F3/F5 from prior F (CEmu behavior).
+- DD/FD prefixed z=7 opcodes map to `LD rp3,(IX/IY+d)` / `LD (IX/IY+d),rp3`.
+- DD/FD 0x31 maps to `LD IY/IX,(IX/IY+d)` instead of `LD SP,nn`.
+- ED 22/23 implemented as LEA rp3,IX/IY + displacement.
+
+### Update (2026-01-29, extended to 3.2M+)
+
+**Progress:** Instruction parity now matches CEmu through **3,216,456 steps** (3.2M+ instructions).
+
+**Key fixes for extended parity:**
+- DD/FD 3E d (y=7, z=6) is `LD (IX/IY+d),IY/IX`, not `LD A,n`.
+- ED z=4 with q=1 is MLT (multiply), not NEG. ED 4C = MLT BC, ED 5C = MLT DE, etc.
+- RTC initialization: control=0, all time values=0 (matches CEmu's memset behavior).
+- RTC load status (reg 0x40): keep pending (0xF8) until scheduler timing would complete it.
+
+**Next divergence:** At step 3,216,456, RTC load status timing differs. CEmu's scheduler has advanced the load process, while our stub keeps it pending. Proper parity would require scheduler integration.
 
 ## The SPI Polling Loop (ROM Code at 0x005BA4-0x005BB7)
 

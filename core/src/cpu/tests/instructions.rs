@@ -178,17 +178,25 @@ fn test_ex_de_hl() {
 }
 
 #[test]
-fn test_mask_addr_adl() {
+fn test_mask_addr_instr_adl() {
     let mut cpu = Cpu::new();
     cpu.adl = true;
+    assert_eq!(cpu.mask_addr_instr(0x123456), 0x123456);
+    assert_eq!(cpu.mask_addr_instr(0xFF123456), 0x123456); // Upper bits masked
+}
+
+#[test]
+fn test_mask_addr_data_l() {
+    let mut cpu = Cpu::new();
+    cpu.l = true;
     assert_eq!(cpu.mask_addr(0x123456), 0x123456);
     assert_eq!(cpu.mask_addr(0xFF123456), 0x123456); // Upper bits masked
 }
 
 #[test]
-fn test_mask_addr_z80() {
+fn test_mask_addr_data_z80() {
     let mut cpu = Cpu::new();
-    cpu.adl = false;
+    cpu.l = false;
     cpu.mbase = 0xD0;
     assert_eq!(cpu.mask_addr(0x1234), 0xD01234);
     assert_eq!(cpu.mask_addr(0xABCDEF), 0xD0CDEF); // Upper bits replaced with MBASE

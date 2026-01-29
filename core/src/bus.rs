@@ -515,9 +515,11 @@ impl Bus {
 
         match Self::decode_address(addr) {
             MemoryRegion::Flash => {
-                // Flash writes are ignored from CPU
-                // Real implementation would check for unlock sequences
+                // Flash writes are ignored unless flash is unlocked
                 self.cycles += Self::UNMAPPED_CYCLES;
+                if self.ports.control.flash_unlocked() {
+                    self.flash.write_cpu(addr, value);
+                }
             }
             MemoryRegion::Ram | MemoryRegion::Vram => {
                 self.cycles += Self::RAM_WRITE_CYCLES;
@@ -588,7 +590,23 @@ impl Bus {
         let addr = addr & addr::ADDR_MASK;
 
         match Self::decode_address(addr) {
-            MemoryRegion::Flash => self.flash.read(addr),
+            MemoryRegion::Flash => self.flash.peek(addr),
+            MemoryRegion::Ram | MemoryRegion::Vram => {
+                self.ram.read(addr - addr::RAM_START)
+            }
+            MemoryRegion::Ports => {
+                let keys = *self.ports.key_state();
+                self.ports.read(addr - addr::PORT_START, &keys)
+            }
+            MemoryRegion::Unmapped => 0x00,
+        }
+    }
+
+    /// Peek a byte as it would be fetched by the CPU (includes flash command status)
+    pub fn peek_byte_fetch(&mut self, addr: u32) -> u8 {
+        let addr = addr & addr::ADDR_MASK;
+        match Self::decode_address(addr) {
+            MemoryRegion::Flash => self.flash.peek_status(addr),
             MemoryRegion::Ram | MemoryRegion::Vram => {
                 self.ram.read(addr - addr::RAM_START)
             }
@@ -687,8 +705,8 @@ impl Bus {
                 self.ports.lcd.read(offset)
             }
             0x5 => {
-                // Interrupt controller - mask with 0x1F
-                let offset = (port & 0x1F) as u32;
+                // Interrupt controller - mask with 0xFF (CEmu port_mirrors)
+                let offset = (port & 0xFF) as u32;
                 self.ports.interrupt.read(offset)
             }
             0x6 => {
@@ -730,7 +748,7 @@ impl Bus {
             0xD => {
                 // SPI - mask with 0x7F (CEmu port_mirrors)
                 let offset = (port & 0x7F) as u32;
-                self.spi.read(offset, self.cycles)
+                self.spi.read(offset, self.cycles, self.ports.control.cpu_speed())
             }
             0xF => {
                 // Control ports alternate - mask with 0xFF
@@ -765,8 +783,8 @@ impl Bus {
                 self.ports.lcd.write(offset, value);
             }
             0x5 => {
-                // Interrupt controller - mask with 0x1F
-                let offset = (port & 0x1F) as u32;
+                // Interrupt controller - mask with 0xFF (CEmu port_mirrors)
+                let offset = (port & 0xFF) as u32;
                 self.ports.interrupt.write(offset, value);
             }
             0x6 => {
@@ -808,7 +826,7 @@ impl Bus {
             0xD => {
                 // SPI - mask with 0x7F
                 let offset = (port & 0x7F) as u32;
-                self.spi.write(offset, value, self.cycles);
+                self.spi.write(offset, value, self.cycles, self.ports.control.cpu_speed());
             }
             0xF => {
                 // Control ports alternate - mask with 0xFF
