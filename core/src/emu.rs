@@ -379,14 +379,49 @@ impl Emu {
         self.cpu.a
     }
 
+    /// Alias for reg_a
+    pub fn a(&self) -> u8 {
+        self.cpu.a
+    }
+
     /// Get the CPU's F register value (flags)
     pub fn reg_f(&self) -> u8 {
+        self.cpu.f
+    }
+
+    /// Alias for reg_f
+    pub fn f(&self) -> u8 {
         self.cpu.f
     }
 
     /// Get the CPU's stack pointer
     pub fn sp(&self) -> u32 {
         self.cpu.sp
+    }
+
+    /// Get the CPU's BC register
+    pub fn bc(&self) -> u32 {
+        self.cpu.bc
+    }
+
+    /// Get the CPU's DE register
+    pub fn de(&self) -> u32 {
+        self.cpu.de
+    }
+
+    /// Get the CPU's HL register
+    pub fn hl(&self) -> u32 {
+        self.cpu.hl
+    }
+
+    /// Get the CPU's IX register
+    pub fn ix(&self) -> u32 {
+        self.cpu.ix
+    }
+
+    /// Get the CPU's IY register
+    pub fn iy(&self) -> u32 {
+        self.cpu.iy
     }
 
     /// Get the CPU's I register (interrupt vector base)

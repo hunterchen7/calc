@@ -180,7 +180,8 @@ fn main() {
 
     // Run until first HALT (or max cycles)
     // Need millions of cycles to get through delay loops
-    for _ in 0..50_000_000 {
+    // Increased to 200M to get further into boot
+    for _ in 0..200_000_000 {
         emu.run_cycles(1);
         step += 1;
 
@@ -228,8 +229,9 @@ fn main() {
     emu.press_on_key();
 
     // Continue execution after wake
+    // Run for 300M more cycles to see boot progress
     let wake_step = step;
-    for _ in 0..50_000_000 {
+    for _ in 0..300_000_000 {
         emu.run_cycles(1);
         step += 1;
 
