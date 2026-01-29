@@ -7,6 +7,7 @@
 //! - Timers (0xF20000)
 //! - LCD Controller (0xE30000)
 //! - Keypad Controller (0xF50000)
+//! - Watchdog Timer (0xF60000)
 
 pub mod control;
 pub mod flash;
@@ -15,6 +16,7 @@ pub mod keypad;
 pub mod lcd;
 pub mod rtc;
 pub mod timer;
+pub mod watchdog;
 
 pub use control::ControlPorts;
 pub use flash::FlashController;
@@ -23,6 +25,7 @@ pub use keypad::{KeypadController, KEYPAD_COLS, KEYPAD_ROWS};
 pub use lcd::{LcdController, LCD_HEIGHT, LCD_WIDTH};
 pub use rtc::RtcController;
 pub use timer::Timer;
+pub use watchdog::WatchdogController;
 
 use interrupt::sources;
 
@@ -41,6 +44,8 @@ const TIMER_BASE: u32 = 0x120000; // 0xF20000
 const TIMER_END: u32 = 0x120040;
 const KEYPAD_BASE: u32 = 0x150000; // 0xF50000
 const KEYPAD_END: u32 = 0x150040;
+const WATCHDOG_BASE: u32 = 0x160000; // 0xF60000
+const WATCHDOG_END: u32 = 0x160100;
 const RTC_BASE: u32 = 0x180000; // 0xF80000
 const RTC_END: u32 = 0x180100;
 
@@ -63,6 +68,8 @@ pub struct Peripherals {
     pub lcd: LcdController,
     /// Keypad controller
     pub keypad: KeypadController,
+    /// Watchdog controller
+    pub watchdog: WatchdogController,
     /// RTC controller
     pub rtc: RtcController,
     /// Fallback register storage for unmapped ports
@@ -86,6 +93,7 @@ impl Peripherals {
             timer3: Timer::new(),
             lcd: LcdController::new(),
             keypad: KeypadController::new(),
+            watchdog: WatchdogController::new(),
             rtc: RtcController::new(),
             fallback: vec![0x00; Self::FALLBACK_SIZE],
             key_state: [[false; KEYPAD_COLS]; KEYPAD_ROWS],
@@ -114,6 +122,7 @@ impl Peripherals {
         self.timer3.reset();
         self.lcd.reset();
         self.keypad.reset();
+        self.watchdog.reset();
         self.rtc.reset();
         self.fallback.fill(0x00);
         self.key_state = [[false; KEYPAD_COLS]; KEYPAD_ROWS];
@@ -167,6 +176,9 @@ impl Peripherals {
 
             // Keypad Controller (0xF50000 - 0xF5003F)
             a if a >= KEYPAD_BASE && a < KEYPAD_END => self.keypad.read(a - KEYPAD_BASE, key_state),
+
+            // Watchdog Controller (0xF60000 - 0xF600FF)
+            a if a >= WATCHDOG_BASE && a < WATCHDOG_END => self.watchdog.read(a - WATCHDOG_BASE),
 
             // RTC Controller (0xF80000 - 0xF800FF)
             a if a >= RTC_BASE && a < RTC_END => self.rtc.read(a - RTC_BASE),
@@ -226,6 +238,9 @@ impl Peripherals {
 
             // Keypad Controller (0xF50000 - 0xF5003F)
             a if a >= KEYPAD_BASE && a < KEYPAD_END => self.keypad.write(a - KEYPAD_BASE, value),
+
+            // Watchdog Controller (0xF60000 - 0xF600FF)
+            a if a >= WATCHDOG_BASE && a < WATCHDOG_END => self.watchdog.write(a - WATCHDOG_BASE, value),
 
             // RTC Controller (0xF80000 - 0xF800FF)
             a if a >= RTC_BASE && a < RTC_END => self.rtc.write(a - RTC_BASE, value),
