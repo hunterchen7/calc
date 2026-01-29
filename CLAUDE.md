@@ -27,7 +27,8 @@ Project-specific guidelines for Claude Code when working on this TI-84 Plus CE e
 ## CEmu Reference
 
 CEmu is the primary reference emulator for TI-84 Plus CE hardware behavior.
-Repository: https://github.com/CE-Programming/CEmu
+- Repository: https://github.com/CE-Programming/CEmu
+- **Local clone**: `cemu-ref/` directory (added to .gitignore, not committed)
 
 ### CEmu Core Directory Structure (core/)
 
@@ -50,6 +51,27 @@ Repository: https://github.com/CE-Programming/CEmu
 
 **Debug:**
 - `debug/` - Debugger and disassembler utilities
+
+### Implementation Status
+
+| CEmu Component | Our Status | Notes |
+|----------------|------------|-------|
+| `asic.c` | ✅ Equivalent | Our `Ports` struct in peripherals/mod.rs serves same role |
+| `cpu.c` | ✅ Implemented | core/src/cpu/ directory |
+| `control.c` | ⚠️ Partial | Missing ports 0x1D-0x1F (privileged register) |
+| `flash.c` | ✅ Implemented | peripherals/flash.rs |
+| `lcd.c` | ✅ Implemented | peripherals/lcd.rs |
+| `timers.c` | ✅ Implemented | peripherals/timers.rs |
+| `keypad.c` | ✅ Implemented | peripherals/keypad.rs |
+| `interrupt.c` | ✅ Implemented | peripherals/interrupt.rs |
+| `mem.c` | ⚠️ Partial | Memory protection checks disabled |
+| `backlight.c` | ❌ Stub | Not needed for boot |
+| `misc.c` | ❌ Missing | Watchdog timer, power events |
+| `realclock.c` | ❌ Missing | RTC - may need stub for boot |
+| `sha256.c` | ❌ Missing | SHA256 accelerator |
+| `spi.c` | ❌ Missing | SPI bus |
+| `uart.c` | ❌ Missing | Serial port |
+| `usb/` | ❌ Missing | USB controller |
 
 ### TI-84 CE Memory Map
 

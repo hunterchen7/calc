@@ -114,7 +114,7 @@ impl Peripherals {
     /// Read from a port address
     /// addr is offset from 0xE00000
     /// key_state is the current keyboard matrix
-    pub fn read(&self, addr: u32, key_state: &[[bool; KEYPAD_COLS]; KEYPAD_ROWS]) -> u8 {
+    pub fn read(&mut self, addr: u32, key_state: &[[bool; KEYPAD_COLS]; KEYPAD_ROWS]) -> u8 {
         match addr {
             // Control Ports (0xE00000 - 0xE000FF)
             a if a >= CONTROL_BASE && a < CONTROL_END => self.control.read(a - CONTROL_BASE),
@@ -228,13 +228,13 @@ impl Peripherals {
     /// Returns true if any interrupt is pending
     pub fn tick(&mut self, cycles: u32) -> bool {
         // Tick timers
-        if self.timer1.tick(cycles) {
+        if self.timer1.tick(cycles) != 0 {
             self.interrupt.raise(sources::TIMER1);
         }
-        if self.timer2.tick(cycles) {
+        if self.timer2.tick(cycles) != 0 {
             self.interrupt.raise(sources::TIMER2);
         }
-        if self.timer3.tick(cycles) {
+        if self.timer3.tick(cycles) != 0 {
             self.interrupt.raise(sources::TIMER3);
         }
 
@@ -347,14 +347,18 @@ mod tests {
 
     #[test]
     fn test_keypad_routing() {
-        let p = Peripherals::new();
+        let mut p = Peripherals::new();
         let mut keys = empty_keys();
+        let scan_cycles = 5000;
 
         // All keys released
+        p.write(KEYPAD_BASE, 0x02); // enable continuous scan
+        p.keypad.tick(scan_cycles, &keys);
         assert_eq!(p.read(KEYPAD_BASE + 0x10, &keys), 0xFF);
 
         // Press a key
         keys[0][3] = true;
+        p.keypad.tick(scan_cycles, &keys);
         assert_eq!(p.read(KEYPAD_BASE + 0x10, &keys), 0xFF ^ (1 << 3));
     }
 
@@ -557,20 +561,20 @@ mod tests {
         let keys = empty_keys();
 
         // Flash controller is at 0xE10000, offset 0x010000 from 0xE00000
-        // Default state: flash is enabled
+        // CEmu default state: flash is enabled
         assert_eq!(p.read(FLASH_BASE + 0x00, &keys), 0x01); // enable
         assert_eq!(p.read(FLASH_BASE + 0x01, &keys), 0x07); // size config
-        assert_eq!(p.read(FLASH_BASE + 0x02, &keys), 0x00); // map select
-        assert_eq!(p.read(FLASH_BASE + 0x05, &keys), 0x00); // wait states
+        assert_eq!(p.read(FLASH_BASE + 0x02, &keys), 0x06); // CEmu defaults to 0x06
+        assert_eq!(p.read(FLASH_BASE + 0x05, &keys), 0x04); // CEmu defaults to 0x04
         assert_eq!(p.read(FLASH_BASE + 0x08, &keys), 0x00); // control
 
         // Write to flash controller registers
-        p.write(FLASH_BASE + 0x05, 0x04); // Set wait states to 4
-        assert_eq!(p.read(FLASH_BASE + 0x05, &keys), 0x04);
+        p.write(FLASH_BASE + 0x05, 0x08); // Set wait states to 8
+        assert_eq!(p.read(FLASH_BASE + 0x05, &keys), 0x08);
 
         // Verify via direct access
-        assert_eq!(p.flash.wait_states(), 0x04);
-        assert_eq!(p.flash.total_wait_cycles(), 10); // 6 + 4
+        assert_eq!(p.flash.wait_states(), 0x08);
+        assert_eq!(p.flash.total_wait_cycles(), 14); // 6 + 8
     }
 
     #[test]
@@ -606,9 +610,10 @@ mod tests {
         p.flash.write(0x05, 0x10); // Wait states
         assert!(!p.flash.is_enabled());
 
-        // Reset should restore defaults
+        // Reset should restore CEmu defaults
         p.reset();
         assert!(p.flash.is_enabled());
-        assert_eq!(p.flash.wait_states(), 0);
+        assert_eq!(p.flash.wait_states(), 0x04); // CEmu default
+        assert_eq!(p.flash.map_select(), 0x06); // CEmu default
     }
 }

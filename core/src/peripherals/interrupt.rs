@@ -49,19 +49,22 @@ pub struct InterruptController {
 
 impl InterruptController {
     /// Create a new interrupt controller
+    /// CEmu sets the PWR interrupt (bit 15) immediately on reset
     pub fn new() -> Self {
         Self {
-            status: 0,
+            // PWR interrupt is set on power-up/reset (CEmu: intrpt_set(INT_PWR, true))
+            status: sources::PWR,
             enabled: 0,
-            raw: 0,
+            raw: sources::PWR,
         }
     }
 
     /// Reset the interrupt controller
+    /// CEmu sets PWR interrupt after clearing all state
     pub fn reset(&mut self) {
-        self.status = 0;
+        self.status = sources::PWR;
         self.enabled = 0;
-        self.raw = 0;
+        self.raw = sources::PWR;
     }
 
     /// Check if any enabled interrupt is pending
@@ -136,8 +139,11 @@ mod tests {
     #[test]
     fn test_new() {
         let ic = InterruptController::new();
-        assert_eq!(ic.status, 0);
+        // CEmu sets PWR interrupt (bit 15) on power-up/reset
+        assert_eq!(ic.status, sources::PWR);
+        assert_eq!(ic.raw, sources::PWR);
         assert_eq!(ic.enabled, 0);
+        // PWR is set but not enabled, so no IRQ pending
         assert!(!ic.irq_pending());
     }
 
@@ -149,9 +155,11 @@ mod tests {
         assert!(ic.irq_pending());
 
         ic.reset();
-        assert_eq!(ic.status, 0);
+        // CEmu sets PWR interrupt on reset
+        assert_eq!(ic.status, sources::PWR);
+        assert_eq!(ic.raw, sources::PWR);
         assert_eq!(ic.enabled, 0);
-        assert_eq!(ic.raw, 0);
+        // PWR is set but not enabled, so no IRQ pending
         assert!(!ic.irq_pending());
     }
 
@@ -236,10 +244,12 @@ mod tests {
         // Raise LCD interrupt (bit 11 - in byte 1)
         ic.raise(sources::LCD);
 
-        // Read byte 0 should be 0
+        // Read byte 0 should be 0 (no interrupts in low byte, PWR is bit 15)
         assert_eq!(ic.read(regs::STATUS), 0);
-        // Read byte 1 should have bit 3 set (bit 11 >> 8 = bit 3)
-        assert_eq!(ic.read(regs::STATUS + 1), (sources::LCD >> 8) as u8);
+        // Read byte 1 should have bit 3 set (LCD, bit 11 >> 8 = bit 3)
+        // Plus bit 7 set (PWR, bit 15 >> 8 = bit 7)
+        let expected = ((sources::LCD >> 8) | (sources::PWR >> 8)) as u8;
+        assert_eq!(ic.read(regs::STATUS + 1), expected);
     }
 
     #[test]
