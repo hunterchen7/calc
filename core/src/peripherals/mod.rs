@@ -76,11 +76,22 @@ pub struct Peripherals {
     fallback: Vec<u8>,
     /// Keypad state (updated by Emu)
     key_state: [[bool; KEYPAD_COLS]; KEYPAD_ROWS],
+    /// OS Timer state (32KHz crystal-based timer, bit 4 interrupt)
+    os_timer_state: bool,
+    /// OS Timer cycle accumulator
+    os_timer_cycles: u64,
 }
 
 impl Peripherals {
     /// Size of fallback register storage
     const FALLBACK_SIZE: usize = 0x200000;
+
+    /// OS Timer tick intervals (in 32KHz ticks) based on CPU speed
+    /// From CEmu: ost_ticks[4] = { 73, 153, 217, 313 }
+    const OS_TIMER_TICKS: [u32; 4] = [73, 153, 217, 313];
+
+    /// 32KHz crystal frequency
+    const CLOCK_32K: u32 = 32768;
 
     /// Create new peripheral subsystem
     pub fn new() -> Self {
@@ -97,6 +108,8 @@ impl Peripherals {
             rtc: RtcController::new(),
             fallback: vec![0x00; Self::FALLBACK_SIZE],
             key_state: [[false; KEYPAD_COLS]; KEYPAD_ROWS],
+            os_timer_state: false,
+            os_timer_cycles: 0,
         }
     }
 
@@ -126,6 +139,8 @@ impl Peripherals {
         self.rtc.reset();
         self.fallback.fill(0x00);
         self.key_state = [[false; KEYPAD_COLS]; KEYPAD_ROWS];
+        self.os_timer_state = false;
+        self.os_timer_cycles = 0;
     }
 
     /// Read from a port address
@@ -277,7 +292,55 @@ impl Peripherals {
             self.interrupt.raise(sources::KEYPAD);
         }
 
+        // Tick OS Timer (32KHz crystal-based timer)
+        self.tick_os_timer(cycles);
+
         self.interrupt.irq_pending()
+    }
+
+    /// Tick the OS Timer (32KHz crystal timer, generates bit 4 interrupt)
+    /// Based on CEmu's ost_event in timers.c
+    fn tick_os_timer(&mut self, cycles: u32) {
+        // Get CPU speed from control port (bits 0-1)
+        let speed = (self.control.read(0x01) & 0x03) as usize;
+
+        // CPU clock rates: 6MHz, 12MHz, 24MHz, 48MHz
+        let cpu_clock: u64 = match speed {
+            0 => 6_000_000,
+            1 => 12_000_000,
+            2 => 24_000_000,
+            _ => 48_000_000,
+        };
+
+        // Cycles per 32KHz tick at current CPU speed
+        let cycles_per_32k_tick = cpu_clock / Self::CLOCK_32K as u64;
+
+        // OS Timer interval in 32K ticks depends on state:
+        // - When state is false: wait ost_ticks[speed] ticks
+        // - When state is true: wait 1 tick
+        let ticks_needed = if self.os_timer_state {
+            1u64
+        } else {
+            Self::OS_TIMER_TICKS[speed] as u64
+        };
+
+        let cycles_needed = ticks_needed * cycles_per_32k_tick;
+
+        self.os_timer_cycles += cycles as u64;
+
+        // Check if enough cycles have passed to toggle state
+        while self.os_timer_cycles >= cycles_needed {
+            self.os_timer_cycles -= cycles_needed;
+            self.os_timer_state = !self.os_timer_state;
+
+            // Update interrupt state based on os_timer_state
+            // CEmu: intrpt_set(INT_OSTIMER, gpt.osTimerState);
+            if self.os_timer_state {
+                self.interrupt.raise(sources::OSTIMER);
+            }
+            // Note: We don't clear the interrupt here - it's level-triggered
+            // and will be cleared by software acknowledging it
+        }
     }
 
     /// Check if any interrupt is pending
