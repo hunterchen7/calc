@@ -58,7 +58,7 @@ CEmu is the primary reference emulator for TI-84 Plus CE hardware behavior.
 |----------------|------------|-------|
 | `asic.c` | ✅ Equivalent | Our `Ports` struct in peripherals/mod.rs serves same role |
 | `cpu.c` | ✅ Implemented | core/src/cpu/ directory |
-| `control.c` | ⚠️ Partial | Missing ports 0x1D-0x1F (privileged register) |
+| `control.c` | ✅ Implemented | peripherals/control.rs |
 | `flash.c` | ✅ Implemented | peripherals/flash.rs |
 | `lcd.c` | ✅ Implemented | peripherals/lcd.rs |
 | `timers.c` | ✅ Implemented | peripherals/timers.rs |
@@ -121,9 +121,14 @@ The ROM boot sequence:
 2. Configures control ports via OUT0 instructions
 3. Sets up memory protection boundaries
 4. Configures flash controller
-5. HALTs waiting for hardware ready (currently stuck here)
+5. Initializes VRAM (screen shows white)
+6. Polls LCD status (current blocker at PC=0x5BA9)
 
-The ROM at 0x001414 HALTs with interrupts disabled, likely waiting for:
-- Flash controller ready status
-- Memory protection configuration
-- Control port initialization
+### eZ80-Specific Behavior
+
+Key differences from standard Z80 that affect emulation:
+
+- **Memory-mapped I/O**: `IN r,(C)` and `OUT (C),r` access address `0xFF0000 | C`, not traditional I/O ports
+- **L/IL mode flags**: Separate flags for data (L) vs instruction (IL) addressing; suffix opcodes (0x40, 0x49, 0x52, 0x5B) temporarily override these per-instruction
+- **Block instructions**: LDIR, LDDR, CPIR, CPDR, OTIMR, etc. execute all iterations in a single `step()` call (matches CEmu behavior)
+- **ED prefix decoding**: ED z=5 RETN/RETI only valid for y=0,1; other y values are NOP
