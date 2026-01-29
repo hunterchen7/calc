@@ -13,6 +13,7 @@ pub mod flash;
 pub mod interrupt;
 pub mod keypad;
 pub mod lcd;
+pub mod rtc;
 pub mod timer;
 
 pub use control::ControlPorts;
@@ -20,6 +21,7 @@ pub use flash::FlashController;
 pub use interrupt::InterruptController;
 pub use keypad::{KeypadController, KEYPAD_COLS, KEYPAD_ROWS};
 pub use lcd::{LcdController, LCD_HEIGHT, LCD_WIDTH};
+pub use rtc::RtcController;
 pub use timer::Timer;
 
 use interrupt::sources;
@@ -39,6 +41,8 @@ const TIMER_BASE: u32 = 0x120000; // 0xF20000
 const TIMER_END: u32 = 0x120040;
 const KEYPAD_BASE: u32 = 0x150000; // 0xF50000
 const KEYPAD_END: u32 = 0x150040;
+const RTC_BASE: u32 = 0x180000; // 0xF80000
+const RTC_END: u32 = 0x180100;
 
 /// Peripheral subsystem containing all hardware controllers
 #[derive(Debug, Clone)]
@@ -59,6 +63,8 @@ pub struct Peripherals {
     pub lcd: LcdController,
     /// Keypad controller
     pub keypad: KeypadController,
+    /// RTC controller
+    pub rtc: RtcController,
     /// Fallback register storage for unmapped ports
     fallback: Vec<u8>,
     /// Keypad state (updated by Emu)
@@ -80,6 +86,7 @@ impl Peripherals {
             timer3: Timer::new(),
             lcd: LcdController::new(),
             keypad: KeypadController::new(),
+            rtc: RtcController::new(),
             fallback: vec![0x00; Self::FALLBACK_SIZE],
             key_state: [[false; KEYPAD_COLS]; KEYPAD_ROWS],
         }
@@ -107,6 +114,7 @@ impl Peripherals {
         self.timer3.reset();
         self.lcd.reset();
         self.keypad.reset();
+        self.rtc.reset();
         self.fallback.fill(0x00);
         self.key_state = [[false; KEYPAD_COLS]; KEYPAD_ROWS];
     }
@@ -159,6 +167,9 @@ impl Peripherals {
 
             // Keypad Controller (0xF50000 - 0xF5003F)
             a if a >= KEYPAD_BASE && a < KEYPAD_END => self.keypad.read(a - KEYPAD_BASE, key_state),
+
+            // RTC Controller (0xF80000 - 0xF800FF)
+            a if a >= RTC_BASE && a < RTC_END => self.rtc.read(a - RTC_BASE),
 
             // Unmapped - return from fallback storage
             _ => {
@@ -215,6 +226,9 @@ impl Peripherals {
 
             // Keypad Controller (0xF50000 - 0xF5003F)
             a if a >= KEYPAD_BASE && a < KEYPAD_END => self.keypad.write(a - KEYPAD_BASE, value),
+
+            // RTC Controller (0xF80000 - 0xF800FF)
+            a if a >= RTC_BASE && a < RTC_END => self.rtc.write(a - RTC_BASE, value),
 
             // Unmapped - store in fallback
             _ => {
@@ -315,16 +329,16 @@ mod tests {
         let mut p = Peripherals::new();
         let keys = empty_keys();
 
-        // Write to LCD upbase register
-        p.write(LCD_BASE + 0x1C, 0x00);
-        p.write(LCD_BASE + 0x1D, 0x00);
-        p.write(LCD_BASE + 0x1E, 0xD5);
+        // Write to LCD upbase register (offset 0x10-0x13)
+        p.write(LCD_BASE + 0x10, 0x00);
+        p.write(LCD_BASE + 0x11, 0x00);
+        p.write(LCD_BASE + 0x12, 0xD5);
 
         assert_eq!(p.lcd.upbase(), 0xD50000);
 
         // Read back
-        assert_eq!(p.read(LCD_BASE + 0x1C, &keys), 0x00);
-        assert_eq!(p.read(LCD_BASE + 0x1E, &keys), 0xD5);
+        assert_eq!(p.read(LCD_BASE + 0x10, &keys), 0x00);
+        assert_eq!(p.read(LCD_BASE + 0x12, &keys), 0xD5);
     }
 
     #[test]
@@ -429,8 +443,9 @@ mod tests {
         let mut p = Peripherals::new();
 
         // Enable LCD with VBLANK interrupt via write API
-        p.write(LCD_BASE + 0x10, 0x01); // ENABLE
-        p.write(LCD_BASE + 0x14, 0x01); // Enable VBLANK interrupt mask
+        // Control is at offset 0x18, INT_MASK is at offset 0x1C
+        p.write(LCD_BASE + 0x18, 0x01); // ENABLE (control bit 0)
+        p.write(LCD_BASE + 0x1C, 0x01); // Enable VBLANK interrupt mask
 
         // Enable LCD interrupt in interrupt controller (bit 11 - in byte 1)
         p.write(INT_BASE + 0x04, 0x00); // Low byte
