@@ -94,11 +94,11 @@
 - [ ] SHA256 accelerator (port 0x2) - stub or full implementation
 - [ ] SPI controller (port 0xD) - basic stub
 
-### 5d: Boot Debugging
-- [ ] Compare execution trace with CEmu at divergence point
-- [ ] Verify LDIR/block instructions execute during boot
-- [ ] Trace why RAM isn't initialized (107 writes = stack only)
-- [ ] Test with corrected control port defaults
+### 5d: Boot Debugging ✓
+- [x] Compare execution trace with CEmu at divergence point
+- [x] Verify LDIR/block instructions execute during boot
+- [x] Trace why RAM isn't initialized (107 writes = stack only)
+- [x] Test with corrected control port defaults
 
 ### 5e: Visible OS Screen
 - [ ] ROM successfully copies code to RAM
@@ -123,9 +123,9 @@
 - [x] Updated LDIR test for internal looping behavior
 
 **Key Progress:**
-- Boot trace comparison tool created (docs/trace-comparison.md)
+- Boot trace comparison methodology documented (docs/trace-comparison.md)
 - CEmu reference clone configured for trace comparison
-- Execution trace shows 40,001+ matching steps before divergence
+- Execution trace matches CEmu for 40,001+ steps
 - VRAM is being written (screen shows all white pixels)
 - ROM is now waiting on port 0x0D (LCD enable) status
 

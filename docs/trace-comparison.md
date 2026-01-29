@@ -1,7 +1,7 @@
-# CEmu vs emu-core boot trace comparison (2026-01-29)
+# CEmu vs emu-core Boot Trace Comparison
 
 ## Goal
-Capture richer boot-time traces from both emulators, then compare to find the earliest divergence and likely causes.
+Capture boot-time traces from both emulators, then compare to find divergences and fix them.
 
 ## How to capture traces
 - emu-core: `cargo run --example trace_boot --manifest-path core/Cargo.toml > trace_ours.log`
@@ -83,61 +83,8 @@ else:
 PY
 ```
 
-## Key findings so far
-1. **ED z=6 decode mismatch fixed.**
-   - CEmu treats `ED 7E` as `RSMIX` (MADL=0), not IM2.
-   - emu-core now only sets IM for `ED 46/56/5E` (y=0/2/3). This removed the earliest IM divergence at `PC=000003`.
-
-2. **Current earliest divergence: ADL flips off too early.**
-   - At `PC=000E57` (opcode `3E`), emu-core has `ADL=0` while CEmu keeps `ADL=1`.
-   - This is likely due to suffix handling (e.g., `0x40` treated as a suffix that resets ADL). CEmu keeps ADL enabled here.
-
-3. **Trace visibility is now high enough to pinpoint issues.**
-   - With opcode bytes + peripheral snapshots logged each step, the first mismatch is actionable instead of “blind”.
-
-## Changes made (full list from this effort)
-### emu-core
-- **CPU reset defaults aligned with CEmu**
-  - Default `ADL=false`, `SP=0x000000`, `MBASE=0x00`.
-- **Suffix handling groundwork**
-  - Added `pending_adl` mechanism and applied it before fetch (still needs refinement).
-- **ED z=6 IM decode fix**
-  - Only `y=0/2/3` map to IM0/1/2; `ED 7E` no longer changes IM.
-- **Trace improvements**
-  - `trace_boot` logs opcode bytes using `mask_addr` so Z80-mode fetches match real bytes.
-  - Added logging for interrupt status/control, timers, LCD, and on-key wake.
-- **Snapshot APIs for tracing**
-  - Added `TimerSnapshot` and `LcdSnapshot` plus getters in `Emu`.
-  - Added getters for CPU state (`iff2`, `interrupt_mode`, `adl`, etc.), IRQ state, control registers, and address masking.
-- **Peripheral behavior alignment**
-  - Control port power reads now return stored value (no forced bit 4).
-  - Added LCD/timer getters for trace visibility.
-- **Keypad behavior/tests**
-  - Keypad read now uses last scanned data; tests updated to scan before read.
-  - Added scan helper in tests and updated keypad routing tests accordingly.
-  - Removed unused `scan_enabled` helper and underscored unused `key_state` param.
-- **CPU tests updated for ADL/MBASE**
-  - Tests now set `cpu.adl = true` or `cpu.mbase = 0xD0` where needed.
-  - `test_new_cpu` now expects `adl=false`.
-- **Misc cleanup**
-  - Removed unused `cycles_before` in `core/src/emu.rs`.
-
-### CEmu reference
-- **Per-instruction trace hook**
-  - Added `cpu_set_trace_callback()` and per-instruction trace calls.
-  - `trace_cli` prints `[inst]` lines with opcode bytes for direct comparison.
-
-## What we learned
-- **ED z=6 table is not “all IM”.** Only y=0/2/3 are IM ops; y=7 is `RSMIX` in CEmu.
-- **ADL suffix behavior is subtle.** Treating suffix opcodes as permanent ADL changes is likely wrong; CEmu keeps ADL true through `0x40` here.
-- **Earliest divergence wins.** Fixing the first mismatch prevents cascading “false” divergences later.
-
-## Recommended approach going forward
-1. **Always fix the earliest divergence first.**
+## Recommended approach
+1. **Always fix the earliest divergence first.** Later diffs are usually cascading.
 2. **Add trace-level assertions or micro-tests** for any fix (e.g., suffix/ADL semantics).
 3. **Keep changes minimal and reversible.** Avoid broad tweaks until a trace shows a concrete mismatch.
-4. **Use CEmu as reference, not guesswork.** If we can’t explain a divergence using CEmu’s decode/execute path, pause and inspect it.
-
-## Next steps
-- Fix ADL suffix handling so ADL doesn’t reset at `0x40` in this boot path.
-- Re-run the trace comparison and update the earliest divergence.
+4. **Use CEmu as reference, not guesswork.** If we can't explain a divergence using CEmu's decode/execute path, pause and inspect it.
