@@ -518,6 +518,7 @@ mod tests {
         let mut keys = empty_keys();
 
         // All keys released - should read 0x00 (active-high: no bits set)
+        // Keypad data registers return live state when read (like CEmu's keypad_query_keymap)
         assert_eq!(p.read_test(KEYPAD_BASE + 0x10, &keys), 0x00);
 
         // Press a key
