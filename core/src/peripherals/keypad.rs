@@ -7,7 +7,7 @@
 //!
 //! ## Scan Timing
 //!
-//! When scanning is initiated (modes 2 or 3), the controller scans one row
+//! When scanning is initiated (modes 1, 2 or 3), the controller scans one row
 //! at a time with a configurable delay between rows. After all rows are
 //! scanned, status bits are updated and the scan either repeats (continuous)
 //! or stops (single scan).
@@ -293,13 +293,7 @@ impl KeypadController {
                 self.control
             }
             regs::SIZE => self.size,
-            regs::INT_STATUS => {
-                let status = self.int_status;
-                // Reading status clears the status bits (auto-clear behavior)
-                // This matches CEmu behavior where reading acknowledges the status
-                self.int_status = 0;
-                status
-            }
+            regs::INT_STATUS => self.int_status,
             regs::INT_ACK => self.int_mask,
             a if a >= regs::DATA_BASE && a < regs::DATA_BASE + 0x20 => {
                 // Row data registers
@@ -407,12 +401,20 @@ impl KeypadController {
                     ));
                 }
 
-                // If scanning mode is being enabled (modes 2 or 3), start a scan
-                if (new_mode & 0x02) != 0 && (old_mode & 0x02) == 0 {
-                    self.start_scan();
-                } else if (new_mode & 0x02) == 0 {
-                    // Scanning disabled
-                    self.scanning = false;
+                match new_mode {
+                    mode::CONTINUOUS => {
+                        if old_mode != mode::CONTINUOUS {
+                            self.start_scan();
+                        }
+                    }
+                    mode::SINGLE | mode::MULTI_GROUP => {
+                        // Single/multi-group scans are typically kicked by a write.
+                        self.start_scan();
+                    }
+                    _ => {
+                        // Scanning disabled
+                        self.scanning = false;
+                    }
                 }
             }
             regs::SIZE => {
@@ -600,7 +602,10 @@ mod tests {
 
         // Writing to INT_STATUS should clear those bits
         kp.write(regs::INT_STATUS, 0x05);
-        assert_eq!(kp.read(regs::INT_STATUS, &keys), 0xFF & !0x05);
+        let status = kp.read(regs::INT_STATUS, &keys);
+        assert_eq!(status, 0xFF & !0x05);
+        // Read should not clear status
+        assert_eq!(kp.int_status, status);
     }
 
     #[test]
