@@ -727,6 +727,73 @@ Add the same `needs_any_key_check` flag handling to `bus.port_write()` for port 
 
 **Source**: Discovered via diagnostic logging showing `needs_any_key_check` flag being set but `any_key_check()` never being called.
 
+### Block Instructions Use L Mode, Not ADL Mode (CRITICAL)
+
+Block instructions (LDIR, LDDR, CPIR, CPDR, etc.) must use the **L mode** flag for address masking, not the ADL mode flag:
+
+**CEmu Code:**
+```c
+// All block instructions (line 821 in cpu.c):
+REG_WRITE_EX(HL, r->HL, cpu_mask_mode(r->HL + delta, cpu.L));
+REG_WRITE_EX(DE, r->DE, cpu_mask_mode(r->DE + delta, cpu.L));
+```
+
+**The Difference:**
+- `ADL` mode: Controls instruction/PC addressing (whether PC is 16-bit or 24-bit)
+- `L` mode: Controls data addressing (whether HL/DE/BC are 16-bit or 24-bit)
+
+These modes are usually equal (`L = ADL`) but can differ after a suffix opcode (.SIS, .LIS, .SIL, .LIL).
+
+**The Bug:**
+Our implementation used `wrap_pc()` (which uses `self.adl`) instead of a new `wrap_data()` function (which uses `self.l`):
+
+```rust
+// WRONG: Uses ADL mode
+self.hl = self.wrap_pc(self.hl.wrapping_add(1));
+
+// CORRECT: Uses L mode
+self.hl = self.wrap_data(self.hl.wrapping_add(1));
+```
+
+**Impact:** When a suffix opcode sets L differently from ADL, block instructions would compute wrong addresses, causing memory corruption. This explains VRAM corruption and wrong calculation results - the TI-OS likely uses suffix opcodes before block copy operations.
+
+**Source**: CEmu `cpu.c` line 821 and cpu_mask_mode() function.
+
 ---
 
-_Last updated: 2026-01-30 - Added port I/O vs memory-mapped I/O finding_
+### Stack + Word Operations Use L Mode (CRITICAL)
+
+Several non-block instructions also depend on **L mode** (data width), not ADL, for both
+stack width and memory word size. This includes:
+
+- `PUSH/POP rp` (stack width uses `L`)
+- `EX (SP),HL/IX/IY` (word size uses `L`)
+- `LD (nn),rr` and `LD rr,(nn)` (word size uses `L`)
+- `LD SP,HL/IX/IY` (SP width uses `L`)
+- `JP (HL)/(IX/IY)` (ADL becomes `L` after the jump)
+
+**CEmu behavior:**
+```c
+// Stack width uses L
+cpu_push_word(value);        // uses cpu.L internally
+cpu_pop_word();              // uses cpu.L internally
+
+// Word reads/writes use L
+cpu_read_word(addr);         // uses cpu.L internally
+cpu_write_word(addr, value); // uses cpu.L internally
+
+// Indirect jumps use L for PC mode
+cpu_jump(cpu_read_index(), cpu.L);
+```
+
+**Impact:** If these use ADL instead of L, a suffix opcode (.SIS/.SIL/etc.)
+can desynchronize stack width or word size for a single instruction, causing
+stack corruption and mis-sized memory reads/writes. This matches the "wrong
+results" and VRAM corruption observed after calculator operations.
+
+**Source:** CEmu `cpu.c` (`cpu_push_word`, `cpu_pop_word`, `cpu_read_word`,
+`cpu_write_word`, `cpu_read_sp`, `cpu_write_sp`, and `cpu_jump(..., cpu.L)`).
+
+---
+
+_Last updated: 2026-01-30 - Added L mode vs ADL mode finding for stack/word operations_
