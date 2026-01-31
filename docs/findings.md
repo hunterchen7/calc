@@ -1102,3 +1102,75 @@ if self.os_timer_state { raise() } else { clear_raw() }
 **Source**: Comparison with CEmu's keypad.c, emu.c, and schedule.c.
 
 _Last updated: 2026-01-30 - Keypad input investigation ongoing_
+
+## Android Integration
+
+### JNI Threading Race Conditions Cause Hangs
+
+**Symptoms:**
+- Calculator becomes unresponsive after being idle for a while
+- Calculator hangs after power-off (2nd + ON key combo)
+- Screen freezes showing last displayed image
+- Buttons still animate (Android UI works) but calculator doesn't respond
+- Reset button works, but normal keys don't
+
+**Root Cause:** Data race in JNI layer between multiple threads accessing emulator without synchronization.
+
+**Threading model in Android app:**
+1. **Background thread** (Dispatchers.Default): Continuously calls `runCycles(800_000)` at 60 FPS
+2. **UI thread**: Calls `setKey(row, col, down)` when buttons pressed/released
+3. **Frame update thread**: Calls `copyFramebuffer()` each frame
+
+All three threads access the same `Emu*` instance concurrently without any mutex protection.
+
+**What happens without synchronization:**
+1. Thread A (background) is in middle of `emu_run_cycles()` executing CPU instructions
+2. Thread B (UI) calls `emu_set_key()` and modifies `cpu.any_key_wake`
+3. Thread A reads partially-updated state → undefined behavior
+4. Emulator state becomes corrupted
+5. CPU gets stuck (halted flag or PC in wrong state)
+6. Calculator appears frozen
+
+**Investigation process:**
+1. User reported hangs after idle and after 2nd + ON
+2. First suspected HALT/wake mechanism bugs
+3. Verified `any_key_wake` logic works correctly in single-threaded tests
+4. Examined Android app threading model in MainActivity.kt
+5. Discovered JNI calls from multiple threads without locks
+6. Found JNI layer (jni.cpp) had NO mutex protecting emulator
+
+**Solution:** Added `g_emulator_mutex` to serialize all JNI emulator operations:
+```cpp
+// Mutex to protect emulator instance from concurrent access
+static std::mutex g_emulator_mutex;
+
+JNIEXPORT jint JNICALL
+Java_com_calc_emulator_EmulatorBridge_nativeRunCycles(...) {
+    std::lock_guard<std::mutex> lock(g_emulator_mutex);
+    return emu_run_cycles(emu, cycles);
+}
+
+JNIEXPORT void JNICALL
+Java_com_calc_emulator_EmulatorBridge_nativeSetKey(...) {
+    std::lock_guard<std::mutex> lock(g_emulator_mutex);
+    emu_set_key(emu, row, col, down);
+}
+```
+
+All JNI functions now acquire the lock using `std::lock_guard` for RAII safety.
+
+**Why this works:**
+- Mutex serializes all emulator access → no concurrent modification
+- Each operation completes atomically before next begins
+- No partial updates or corrupted state
+- Performance impact minimal (operations are quick, <1ms typically)
+
+**Lessons learned:**
+1. **Threading issues are hard to debug** - Symptoms appear unrelated to root cause
+2. **Cross-language boundaries need extra care** - JNI bypasses Rust's borrow checker
+3. **Always synchronize shared mutable state** - Even if operations seem "quick"
+4. **Test with real usage patterns** - Concurrency bugs don't show up in unit tests
+
+**Source**: Android app MainActivity.kt, JNI layer jni.cpp, investigation of hang symptoms.
+
+_Fixed: 2026-01-31 - Added g_emulator_mutex to prevent race conditions_
