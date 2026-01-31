@@ -150,6 +150,8 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
     }
 
     // Emulation loop
+    // TI-OS expression parser initialization is handled in the Rust core after boot.
+    // See docs/findings.md "TI-OS Expression Parser Requires Initialization After Boot"
     LaunchedEffect(isRunning) {
         if (isRunning) {
             while (isRunning) {
@@ -206,6 +208,14 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
             onKeyDown = { row, col ->
                 lastKeyPress = "($row,$col) DOWN"
                 Log.d("Keypad", "Key DOWN: row=$row col=$col")
+                // For ENTER key (row 6, col 0), enable immediate trace to capture calculation
+                // For other keys, arm trace for wake from HALT
+                if (row == 6 && col == 0) {
+                    Log.d("Keypad", "ENTER key - enabling immediate trace for calculation")
+                    emulator.enableInstTrace(10000)  // Capture 10000 instructions (HALT cycles now skipped)
+                } else {
+                    emulator.armInstTraceOnWake(500)
+                }
                 emulator.setKey(row, col, true)
                 frameCounter++
             },
