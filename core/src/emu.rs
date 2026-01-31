@@ -280,27 +280,16 @@ impl Emu {
     }
 
     /// Run for specified cycles, returns cycles actually executed
+    ///
+    /// # TI-OS Expression Parser Initialization
+    ///
+    /// Note: Parser initialization is NOT handled here. Instead, it's handled in `set_key()`
+    /// which auto-injects an ENTER on the first key press after boot. This allows the boot
+    /// screen ("TI-84 Plus CE", OS version, "RAM Cleared") to remain visible until the user
+    /// presses their first key. See `set_key()` documentation for details.
     pub fn run_cycles(&mut self, cycles: u32) -> u32 {
         if !self.rom_loaded || !self.powered_on {
             return 0;
-        }
-
-        // TI-OS expression parser initialization after boot completes
-        // After boot, the first ENTER shows "Done" instead of evaluating expressions.
-        // Send a single ENTER press/release to prime the parser (matches CEmu autotester).
-        // See docs/findings.md "TI-OS Expression Parser Requires Initialization After Boot"
-        if !self.boot_init_done && self.total_cycles > BOOT_COMPLETE_CYCLES {
-            log_event("BOOT_INIT: sending initialization ENTER to prime TI-OS parser");
-            // Press ENTER (row 6, col 0)
-            self.set_key(6, 0, true);
-            // Run cycles to let TI-OS process the key press
-            self.run_cycles_internal(3_000_000);
-            // Release ENTER
-            self.set_key(6, 0, false);
-            // Run more cycles to let TI-OS finish processing
-            self.run_cycles_internal(5_000_000);
-            self.boot_init_done = true;
-            log_event("BOOT_INIT: TI-OS parser initialization complete");
         }
 
         let mut cycles_remaining = cycles as i32;
@@ -550,7 +539,54 @@ impl Emu {
 
     /// Set key state
     /// Special handling for ON key (row 2, col 0) which has dedicated interrupt
+    /// Set key state in the keypad matrix.
+    ///
+    /// # TI-OS Expression Parser Initialization
+    ///
+    /// On first key press after boot completes, this automatically injects an ENTER
+    /// press/release to dismiss the boot screen and initialize the TI-OS expression parser.
+    ///
+    /// **Behavior:**
+    /// 1. On boot, TI-OS displays "TI-84 Plus CE", OS version, and "RAM Cleared"
+    /// 2. User's first key press is detected (any key except ON, any time after boot)
+    /// 3. If first key is ENTER: just process it (dismisses boot screen + inits parser)
+    /// 4. If first key is ON: ignore it (keep waiting for a normal key)
+    /// 5. If first key is any other key: inject ENTER first, then process user's key
+    ///
+    /// **Why this is needed:**
+    /// After boot, TI-OS expression parser is in an uninitialized state. The first ENTER
+    /// press shows "Done" instead of evaluating expressions. Subsequent ENTERs work normally.
+    /// By auto-injecting ENTER on first user interaction, we:
+    /// - Let users see the boot screen (OS version info)
+    /// - Initialize the parser transparently
+    /// - Provide smooth UX (no need to manually press ENTER twice)
+    ///
+    /// See docs/findings.md "TI-OS Expression Parser Requires Initialization After Boot"
     pub fn set_key(&mut self, row: usize, col: usize, down: bool) {
+        // Auto-initialize TI-OS parser on first key press after boot
+        // Skip ON key (row 2, col 0) - it's for power management, not normal input
+        if down && !self.boot_init_done && self.total_cycles > BOOT_COMPLETE_CYCLES && !(row == 2 && col == 0) {
+            // If user's first key IS ENTER, just let it through (don't inject another ENTER)
+            // Otherwise, inject ENTER before processing their key
+            if row == 6 && col == 0 {
+                log_event("BOOT_INIT: first key is ENTER, using it to dismiss boot screen");
+                self.boot_init_done = true;
+                // Continue to process user's ENTER press below
+            } else {
+                log_event("BOOT_INIT: first key press detected, auto-dismissing boot screen with ENTER");
+                // Press ENTER (row 6, col 0) to dismiss boot screen
+                self.bus.set_key(6, 0, true);
+                self.cpu.any_key_wake = true;
+                self.run_cycles_internal(1_500_000);
+                // Release ENTER
+                self.bus.set_key(6, 0, false);
+                self.run_cycles_internal(3_000_000);
+                self.boot_init_done = true;
+                log_event("BOOT_INIT: boot screen dismissed, processing user key");
+                // Continue to process the original key press below
+            }
+        }
+
         // ON key (row 2, col 0) has special handling - it can wake from HALT
         // even with interrupts disabled and raises dedicated ON_KEY interrupt
         if row == 2 && col == 0 {
