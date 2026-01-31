@@ -34,3 +34,8 @@ Thumbs.db
 # Reference emulator (not part of project)
 /cemu-ref/
 *.log
+*.ppm
+*.png
+
+# Claude Code local settings
+.claude/

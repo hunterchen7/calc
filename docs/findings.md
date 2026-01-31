@@ -976,4 +976,50 @@ The magnitude error of 10^8 corresponds to an exponent byte difference of +8 (e.
 **Next steps:** Generate CEmu trace for identical calculation and compare instruction-by-instruction
 to find first divergence point.
 
-_Last updated: 2026-01-30 - All common L-mode instructions verified correct_
+### New Finding: OS Timer Toggle Order (Fixed)
+
+The OS Timer interrupt state toggle was happening BEFORE setting the interrupt, when it should happen AFTER (like CEmu):
+
+**Wrong order (our code):**
+```rust
+if self.os_timer_state { raise() } else { clear_raw() }
+self.os_timer_state = !self.os_timer_state;
+```
+
+**Correct order (CEmu):**
+```rust
+self.os_timer_state = !self.os_timer_state;
+if self.os_timer_state { raise() } else { clear_raw() }
+```
+
+**Impact**: Timer interrupt was being raised when state was about to become false, causing it to be cleared almost immediately on the next toggle. Fixed by toggling first, then setting interrupt based on new state.
+
+### New Finding: Keypad Input Not Being Detected
+
+**Issue**: Keys pressed after boot don't affect OP1 (calculation result).
+
+**What we verified:**
+1. ✅ OS Timer interrupts ARE firing and being handled
+2. ✅ CPU wakes from HALT via `any_key_wake` mechanism
+3. ✅ Keypad `current_scan_data` IS being updated with pressed key bits
+4. ✅ Key row/col mappings match CEmu's matrix layout
+
+**What we found:**
+1. ❌ Keypad mode stays at 0 (idle) - never changes to mode 1 during key handling
+2. ❌ Keypad interrupt (bit 10) is NOT enabled in `int_enabled` (0x3019)
+3. ❌ No KEYPAD_MODE changes during key processing
+4. ❌ No keypad register reads/writes during key processing
+
+**Likely cause**: TI-OS timer interrupt handler should be switching keypad to mode 1, triggering `any_key_check`, and reading data registers. This isn't happening, possibly because:
+- Our interrupt handler returns too quickly
+- Something in the interrupt controller behavior differs from CEmu
+- The timer handler expects a different interrupt status/flag state
+
+**What we tried that didn't work:**
+1. Raising keypad interrupt directly on key press (KEYPAD not enabled)
+2. Preserving `current_scan_data` on key release (data is preserved but not read)
+3. Setting `any_key_wake` to trigger key detection (CPU wakes but idle loop HALTs again)
+
+**Source**: Comparison with CEmu's keypad.c, emu.c, and schedule.c.
+
+_Last updated: 2026-01-30 - Keypad input investigation ongoing_

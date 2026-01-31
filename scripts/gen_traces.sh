@@ -23,10 +23,10 @@ cd cemu-ref
 cd ..
 echo "  Done: $(wc -l < "$CEMU_TRACE") lines"
 
-# Generate our trace
+# Generate our trace (100K steps by default)
 echo "Generating our trace -> $OURS_TRACE"
 cd core
-cargo run --release --example clean_trace > "../$OURS_TRACE" 2>&1
+cargo run --release --example debug -- trace 100000 > "../$OURS_TRACE" 2>&1
 cd ..
 echo "  Done: $(wc -l < "$OURS_TRACE") lines"
 
