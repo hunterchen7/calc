@@ -48,6 +48,11 @@ fn main() {
             }
             cmd_compare(&args[2]);
         }
+        "calc" => {
+            // Default to "6+7" calculation
+            let expr = args.get(2).map(|s| s.as_str()).unwrap_or("6+7");
+            cmd_calc(expr);
+        }
         "help" | "--help" | "-h" => print_help(),
         _ => {
             eprintln!("Unknown command: {}", args[1]);
@@ -79,6 +84,11 @@ Commands:
 
   compare <file>    Compare our trace with CEmu trace file
                     Reports first divergence point and statistics
+
+  calc [expr]       Run a calculation and trace it
+                    Default: "6+7"
+                    Boots, types expression, captures trace on ENTER
+                    Supported chars: 0-9, +, -, *, /
 
   help              Show this help message
 
@@ -116,6 +126,8 @@ fn create_emu() -> Option<Emu> {
     let rom_data = load_rom()?;
     let mut emu = Emu::new();
     emu.load_rom(&rom_data).expect("Failed to load ROM");
+    // Power on the calculator (required before run_cycles will execute)
+    emu.press_on_key();
     Some(emu)
 }
 
@@ -273,6 +285,148 @@ fn log_trace_line(writer: &mut BufWriter<File>, emu: &mut Emu, step: u64, cycles
         if halted { 1 } else { 0 },
         op_str
     ).expect("Failed to write trace line");
+}
+
+// === Calculation Test ===
+
+/// Key mappings for TI-84 CE (row, col)
+fn char_to_key(c: char) -> Option<(usize, usize)> {
+    match c {
+        '0' => Some((3, 0)),
+        '1' => Some((3, 1)),
+        '2' => Some((4, 1)),
+        '3' => Some((5, 1)),
+        '4' => Some((3, 2)),
+        '5' => Some((4, 2)),
+        '6' => Some((5, 2)),
+        '7' => Some((3, 3)),
+        '8' => Some((4, 3)),
+        '9' => Some((5, 3)),
+        '+' => Some((6, 1)),
+        '-' => Some((6, 2)),
+        '*' => Some((6, 3)),
+        '/' => Some((6, 4)),
+        _ => None,
+    }
+}
+
+fn cmd_calc(expr: &str) {
+    let mut emu = match create_emu() {
+        Some(e) => e,
+        None => return,
+    };
+
+    println!("\n=== Calculation Test: {} ===\n", expr);
+
+    // Boot and wait for auto-init (65M cycles + margin)
+    println!("Booting...");
+    let boot_cycles = 70_000_000u32;
+    let mut total = 0u64;
+    while total < boot_cycles as u64 {
+        let executed = emu.run_cycles(1_000_000);
+        total += executed as u64;
+        if total % 10_000_000 < 1_000_000 {
+            println!("  {:.1}M cycles...", total as f64 / 1_000_000.0);
+        }
+    }
+    println!("Boot complete ({:.1}M cycles)", total as f64 / 1_000_000.0);
+
+    // Release the ON key that was pressed during power_on
+    emu.release_on_key();
+    // Give TI-OS time to process the key release
+    emu.run_cycles(1_000_000);
+
+    // Send initialization ENTER to get TI-OS expression parser ready
+    // See findings.md: first ENTER after boot shows "Done" instead of result
+    // This initializes the parser state so subsequent calculations work
+    println!("Sending init ENTER...");
+    emu.set_key(6, 0, true);
+    emu.run_cycles(500_000);
+    emu.set_key(6, 0, false);
+    emu.run_cycles(2_000_000);  // Give time to process
+
+    // Helper to show OP1
+    fn show_op1(emu: &mut Emu, label: &str) {
+        print!("  OP1 {}: ", label);
+        for i in 0..9 {
+            print!("{:02X} ", emu.peek_byte(0xD005F8 + i));
+        }
+        println!();
+    }
+
+    show_op1(&mut emu, "after boot");
+    let int_status = emu.interrupt_status();
+    let int_enabled = emu.interrupt_enabled();
+    println!("  Keypad mode: {}, CPU halted: {}, IFF1: {}", emu.keypad_mode(), emu.is_halted(), emu.iff1());
+    println!("  int_status: 0x{:08X}, int_enabled: 0x{:08X}, pending: 0x{:08X}",
+             int_status, int_enabled, int_status & int_enabled);
+
+    // Type the expression
+    println!("\nTyping expression: {}", expr);
+    for c in expr.chars() {
+        if let Some((row, col)) = char_to_key(c) {
+            println!("  Key '{}' -> row={}, col={}", c, row, col);
+            emu.set_key(row, col, true);
+            let cycles = emu.run_cycles(500_000);  // ~10ms hold
+            let int_pending = emu.interrupt_status() & emu.interrupt_enabled();
+            println!("    Executed {} cycles, halted={}, PC=0x{:06X}, int_pending=0x{:08X}",
+                     cycles, emu.is_halted(), emu.pc(), int_pending);
+            emu.set_key(row, col, false);
+            emu.run_cycles(500_000);  // ~10ms release
+            show_op1(&mut emu, &format!("after '{}'", c));
+        } else {
+            eprintln!("  Unknown key: '{}'", c);
+        }
+    }
+
+    // Press ENTER and trace the calculation
+    println!("\nPressing ENTER and tracing calculation...");
+
+    // Create trace file
+    fs::create_dir_all("../traces").ok();
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let output_path = format!("../traces/calc_{}_{}.log", expr.replace("+", "plus").replace("-", "minus"), timestamp);
+    let file = File::create(&output_path).expect("Failed to create trace file");
+    let mut writer = BufWriter::new(file);
+
+    // Press ENTER
+    emu.set_key(6, 0, true);
+
+    // Trace execution
+    let trace_steps = 50_000u64;
+    let mut step = 0u64;
+    let mut trace_cycles = 0u64;
+
+    while step < trace_steps {
+        let cycles = emu.run_cycles(1) as u64;
+        trace_cycles += cycles;
+        log_trace_line(&mut writer, &mut emu, step, trace_cycles);
+        step += 1;
+
+        if step % 10_000 == 0 {
+            eprintln!("  Traced {} steps...", step);
+        }
+    }
+
+    // Release ENTER
+    emu.set_key(6, 0, false);
+
+    writer.flush().expect("Failed to flush");
+    println!("\nTrace saved to: {}", output_path);
+
+    // Render and save screen
+    emu.run_cycles(5_000_000);  // Let display update
+    emu.render_frame();
+    let screen_path = format!("calc_{}_result.ppm", expr.replace("+", "plus").replace("-", "minus"));
+    save_framebuffer_ppm(&emu, &screen_path);
+    println!("Screen saved to: {}", screen_path);
+
+    // Show OP1 (result register)
+    println!("\n=== Result (OP1 at 0xD005F8) ===");
+    for i in 0..9 {
+        print!("{:02X} ", emu.peek_byte(0xD005F8 + i));
+    }
+    println!();
 }
 
 // === Screen Rendering ===

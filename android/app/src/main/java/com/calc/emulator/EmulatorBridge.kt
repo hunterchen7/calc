@@ -147,6 +147,24 @@ class EmulatorBridge {
     fun isCreated(): Boolean = handle != 0L
 
     /**
+     * Enable instruction trace for debugging.
+     * @param count Number of instructions to trace
+     */
+    fun enableInstTrace(count: Int) {
+        // Debug stub - tracing not yet implemented in JNI
+        Log.d(TAG, "enableInstTrace($count) - stub")
+    }
+
+    /**
+     * Arm instruction trace to start on next wake from HALT.
+     * @param count Number of instructions to trace after wake
+     */
+    fun armInstTraceOnWake(count: Int) {
+        // Debug stub - tracing not yet implemented in JNI
+        Log.d(TAG, "armInstTraceOnWake($count) - stub")
+    }
+
+    /**
      * Drain pending emulator log lines (if any).
      */
     fun drainLogs(): List<String> {

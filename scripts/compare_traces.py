@@ -14,31 +14,83 @@ import sys
 import re
 
 def parse_cemu_line(line):
-    """Parse a CEmu trace line and extract key fields."""
-    if not line.startswith('[inst]'):
+    """Parse a CEmu trace line and extract key fields.
+
+    Format: step cycles PC SP AF BC DE HL IX IY ADL IFF1 IFF2 IM HALT opcode
+    Example: 000001 00000010 000001 000000 0000 000000 ...
+    """
+    line = line.strip()
+    if not line or line.startswith('#'):
         return None
 
-    match = re.search(r'i=(\d+)\s+PC=([0-9A-Fa-f]+)', line)
-    if match:
-        return {
-            'i': int(match.group(1)),
-            'pc': match.group(2).upper(),
-            'raw': line.strip()
-        }
+    # Try space-separated format first
+    parts = line.split()
+    if len(parts) >= 3:
+        try:
+            step = int(parts[0])
+            pc = parts[2].upper().zfill(6)  # PC is column 3 (index 2)
+            return {
+                'i': step,
+                'pc': pc,
+                'af': parts[4].upper() if len(parts) > 4 else '0000',
+                'bc': parts[5].upper() if len(parts) > 5 else '000000',
+                'de': parts[6].upper() if len(parts) > 6 else '000000',
+                'hl': parts[7].upper() if len(parts) > 7 else '000000',
+                'raw': line
+            }
+        except (ValueError, IndexError):
+            pass
+
+    # Fall back to old [inst] format
+    if line.startswith('[inst]'):
+        match = re.search(r'i=(\d+)\s+PC=([0-9A-Fa-f]+)', line)
+        if match:
+            return {
+                'i': int(match.group(1)),
+                'pc': match.group(2).upper(),
+                'raw': line
+            }
+
     return None
 
 def parse_ours_line(line):
-    """Parse our trace line and extract key fields."""
-    if not line.startswith('[snapshot]'):
+    """Parse our trace line and extract key fields.
+
+    Format: step cycles PC SP AF BC DE HL IX IY ADL IFF1 IFF2 IM HALT opcode
+    Example: 000001 00000010 000001 000000 0000 000000 ...
+    """
+    line = line.strip()
+    if not line or line.startswith('#'):
         return None
 
-    match = re.search(r'step=(\d+)\s+PC=([0-9A-Fa-f]+)', line)
-    if match:
-        return {
-            'i': int(match.group(1)),
-            'pc': match.group(2).upper(),
-            'raw': line.strip()
-        }
+    # Try new space-separated format first
+    parts = line.split()
+    if len(parts) >= 3:
+        try:
+            step = int(parts[0])
+            pc = parts[2].upper().zfill(6)  # PC is column 3 (index 2)
+            return {
+                'i': step,
+                'pc': pc,
+                'af': parts[4].upper() if len(parts) > 4 else '0000',
+                'bc': parts[5].upper() if len(parts) > 5 else '000000',
+                'de': parts[6].upper() if len(parts) > 6 else '000000',
+                'hl': parts[7].upper() if len(parts) > 7 else '000000',
+                'raw': line
+            }
+        except (ValueError, IndexError):
+            pass
+
+    # Fall back to old [snapshot] format
+    if line.startswith('[snapshot]'):
+        match = re.search(r'step=(\d+)\s+PC=([0-9A-Fa-f]+)', line)
+        if match:
+            return {
+                'i': int(match.group(1)),
+                'pc': match.group(2).upper(),
+                'raw': line
+            }
+
     return None
 
 def compare_traces(cemu_file, ours_file, max_lines=500000):
@@ -79,7 +131,19 @@ def compare_traces(cemu_file, ours_file, max_lines=500000):
         cemu = cemu_entries[cemu_idx]
 
         if cemu['pc'] == ours['pc']:
-            # PCs match, advance both
+            # PCs match - also check registers for early divergence warning
+            reg_diffs = []
+            for reg in ['af', 'bc', 'de', 'hl']:
+                if reg in cemu and reg in ours and cemu[reg] != ours[reg]:
+                    reg_diffs.append(f"{reg.upper()}: CEmu={cemu[reg]} vs Ours={ours[reg]}")
+
+            if reg_diffs and matched_count > 0:  # Skip initial state differences
+                print(f"\n*** REGISTER DIVERGENCE at PC={cemu['pc']} (step {matched_count}) ***")
+                for diff in reg_diffs:
+                    print(f"  {diff}")
+                print(f"  CEmu: {cemu['raw'][:120]}")
+                print(f"  Ours: {ours['raw'][:120]}")
+
             matched_count += 1
             cemu_idx += 1
             ours_idx += 1

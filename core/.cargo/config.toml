@@ -19,6 +19,9 @@ vram = "run --release --example debug -- vram"
 # For more steps: cargo run --release --example debug -- trace 1000000
 trace = "run --release --example debug -- trace"
 
+# Run calculation test (e.g., cargo calc 6+7)
+calc = "run --release --example debug -- calc"
+
 # Show debug tool help
 dbg = "run --release --example debug -- help"
 

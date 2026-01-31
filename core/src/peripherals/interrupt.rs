@@ -175,6 +175,16 @@ impl InterruptController {
             _ => {}
         }
     }
+
+    /// Get current status (for debugging)
+    pub fn status(&self) -> u32 {
+        self.banks[0].status
+    }
+
+    /// Get enabled mask (for debugging)
+    pub fn enabled(&self) -> u32 {
+        self.banks[0].enabled
+    }
 }
 
 impl Default for InterruptController {

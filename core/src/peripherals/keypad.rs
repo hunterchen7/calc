@@ -159,19 +159,40 @@ impl KeypadController {
     /// When pressed=true, sets edge flag (will be seen by next query)
     /// When pressed=false, does NOT clear edge (CEmu behavior)
     /// Edge flags are cleared only by query_row_data()
+    ///
+    /// Also immediately updates current_scan_data so the key is visible
+    /// in data register reads regardless of keypad mode. This is critical
+    /// for TI-OS key detection which may not switch to mode 1 before reading.
+    ///
+    /// IMPORTANT: On key release, we do NOT clear current_scan_data!
+    /// The data should persist until the OS reads and processes it.
+    /// CEmu's edge detection works the same way - keymap_edge preserves
+    /// the key press until it's queried.
     pub fn set_key_edge(&mut self, row: usize, col: usize, pressed: bool) {
-        if row < KEYPAD_ROWS && col < KEYPAD_COLS && pressed {
-            // Only set edge on press, not on release (CEmu behavior)
-            self.key_edge_flags[row][col] = true;
-            crate::emu::log_event(&format!(
-                "KEYPAD_EDGE_SET: row={} col={} (will be seen by next scan/query)",
-                row, col
-            ));
+        if row < KEYPAD_ROWS && col < KEYPAD_COLS {
+            if pressed {
+                // Set edge on press, not on release (CEmu behavior)
+                self.key_edge_flags[row][col] = true;
+
+                // Immediately update current_scan_data so the key is visible
+                // This is needed because any_key_check only runs in mode 1,
+                // but TI-OS might read data registers in mode 0.
+                self.current_scan_data[row] |= 1 << col;
+
+                // Set status flags
+                self.int_status |= status::DATA_CHANGED | status::ANY_KEY;
+            } else {
+                // CEmu clears the keyMap bit on release:
+                // keyMap[row] &= ~(1 << col)
+                // The edge flag persists for detection, but the data should reflect
+                // current key state.
+                self.current_scan_data[row] &= !(1 << col);
+            }
         }
     }
 
     /// Get the current scan mode
-    fn mode(&self) -> u8 {
+    pub fn mode(&self) -> u8 {
         self.control & 0x03
     }
 
@@ -398,19 +419,30 @@ impl KeypadController {
                     // Read from stored data (populated by any_key_check or scan events)
                     let row_data = self.current_scan_data[row];
 
-                    // Log data reads (only occasionally to avoid spam)
+                    // Log data reads - log all reads when any key is pressed
                     static mut READ_LOG_COUNT: u32 = 0;
+                    static mut LAST_KEY_STATE_HASH: u64 = 0;
                     unsafe {
                         READ_LOG_COUNT += 1;
-                        if READ_LOG_COUNT % 50000 == 1 {
-                            crate::emu::log_event(&format!(
-                                "KEYPAD_READ: row={} data=0x{:04X} mode={} key_state={:?}",
+                        // Hash of key state to detect changes
+                        let key_hash: u64 = key_state.iter()
+                            .enumerate()
+                            .flat_map(|(r, row)| row.iter().enumerate().map(move |(c, &v)| {
+                                if v { ((r as u64) << 8) | c as u64 } else { 0 }
+                            }))
+                            .fold(0, |acc, x| acc.wrapping_add(x));
+
+                        if row_data != 0 || (key_hash != 0 && key_hash != LAST_KEY_STATE_HASH) {
+                            LAST_KEY_STATE_HASH = key_hash;
+                            eprintln!(
+                                "KEYPAD_READ: row={} data=0x{:04X} mode={} key_state={:?} count={}",
                                 row, row_data, self.mode(),
                                 key_state[row].iter().enumerate()
                                     .filter(|(_, &v)| v)
                                     .map(|(i, _)| i)
-                                    .collect::<Vec<_>>()
-                            ));
+                                    .collect::<Vec<_>>(),
+                                READ_LOG_COUNT
+                            );
                         }
                     }
 
@@ -507,7 +539,6 @@ impl KeypadController {
                     // Mode 0 or 1: stop scanning and do immediate key check
                     self.scanning = false;
                     self.needs_any_key_check = true;
-                    crate::emu::log_event("KEYPAD: CONTROL write set needs_any_key_check=true");
                 }
             }
             // SIZE register is 4 bytes: rows, cols, mask_lo, mask_hi

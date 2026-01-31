@@ -123,16 +123,11 @@ impl Peripherals {
     }
 
     /// Update keypad state from emulator
-    /// Sets key_state and edge flag, but does NOT call any_key_check immediately.
-    /// CEmu's emu_keypad_event just sets the atomic flags and signals CPU -
-    /// the any_key_check is called later when TI-OS writes to registers.
+    /// Sets key_state and edge flag, and raises keypad interrupt on press.
+    ///
+    /// CEmu's emu_keypad_event sets the atomic flags and signals CPU.
+    /// The TI-OS then checks keypad registers during interrupt handling.
     pub fn set_key(&mut self, row: usize, col: usize, pressed: bool) {
-        // Log ALL key events to verify they're reaching the emulator
-        crate::emu::log_event(&format!(
-            "KEY_EVENT: row={} col={} pressed={} (valid={})",
-            row, col, pressed, row < KEYPAD_ROWS && col < KEYPAD_COLS
-        ));
-
         if row < KEYPAD_ROWS && col < KEYPAD_COLS {
             self.key_state[row][col] = pressed;
 
@@ -141,10 +136,11 @@ impl Peripherals {
             // detection of quick press/release even if released before query
             self.keypad.set_key_edge(row, col, pressed);
 
-            // NOTE: We do NOT call any_key_check here! CEmu doesn't either.
-            // The any_key_check is triggered by TI-OS writing to registers
-            // (INT_STATUS, CONTROL, SIZE), not by key events themselves.
-            // The edge flag will be seen when TI-OS does its query.
+            // Raise keypad interrupt on key press so TI-OS will check the keypad
+            // This is critical for TI-OS to detect keys when the keypad is in mode 0
+            if pressed {
+                self.interrupt.raise(sources::KEYPAD);
+            }
         }
     }
 
@@ -421,6 +417,16 @@ impl Peripherals {
 
         self.os_timer_cycles += cycles as u64;
 
+        // Debug: OS Timer state tracking
+        static mut OS_TIMER_DEBUG_COUNT: u64 = 0;
+        unsafe {
+            OS_TIMER_DEBUG_COUNT += 1;
+            if OS_TIMER_DEBUG_COUNT % 5000000 == 1 {
+                eprintln!("OS_TIMER_TICK: count={}, os_timer_cycles={}, state={}, cycles_per_32k_tick={}",
+                         OS_TIMER_DEBUG_COUNT, self.os_timer_cycles, self.os_timer_state, cycles_per_32k_tick);
+            }
+        }
+
         // Check if enough cycles have passed to toggle state
         // cycles_needed must be recalculated each iteration since it depends on os_timer_state
         loop {
@@ -440,18 +446,36 @@ impl Peripherals {
 
             self.os_timer_cycles -= cycles_needed;
 
-            // CEmu order: intrpt_set(INT_OSTIMER, gpt.osTimerState) BEFORE toggle
-            // This sets raw interrupt state to match current timer state
+            // CEmu order: toggle FIRST, then set interrupt to match NEW state
+            // From timers.c ost_event():
+            //   gpt.osTimerState = !gpt.osTimerState;
+            //   intrpt_set(INT_OSTIMER, gpt.osTimerState);
+            self.os_timer_state = !self.os_timer_state;
+
+            // Set interrupt based on NEW state
+            // IMPORTANT: Only RAISE the interrupt on the rising edge.
+            // Do NOT clear_raw when state becomes false - the status should
+            // persist until software acknowledges it via the interrupt controller.
+            //
+            // The issue with calling clear_raw: For non-latched interrupts,
+            // clear_raw also clears the status bit. The OS Timer only stays
+            // in the "true" state for ~1464 cycles at 48MHz, which is too short
+            // for the CPU to reliably process the interrupt before it's cleared.
+            //
+            // By only raising and letting software acknowledge, the interrupt
+            // remains pending until the ISR processes it.
             if self.os_timer_state {
                 self.interrupt.raise(sources::OSTIMER);
-            } else {
-                // Clear raw state when timer state is false
-                // Latched status remains until software acknowledges it
-                self.interrupt.clear_raw(sources::OSTIMER);
             }
+            // Note: We intentionally do NOT call clear_raw(OSTIMER) when state
+            // becomes false. The raw state tracks the physical timer state,
+            // but the interrupt status should remain until acknowledged.
 
-            // Toggle state AFTER setting interrupt (CEmu order)
-            self.os_timer_state = !self.os_timer_state;
+            // IMPORTANT: Only process one state change per tick() call!
+            // This matches CEmu's scheduler-based approach where each timer event
+            // is processed separately, giving the CPU a chance to handle interrupts
+            // before the next state change clears them.
+            break;
         }
     }
 

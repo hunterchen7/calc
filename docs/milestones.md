@@ -66,6 +66,7 @@
 **Goal:** Reach visible OS UI. **COMPLETE** - OS boots to home screen with "RAM Cleared" message.
 
 ### 5a: Core Peripherals ✓
+
 - [x] Interrupt controller (0xF00000) with source tracking
 - [x] CPU interrupt dispatch (Mode 0/1/2, NMI support)
 - [x] General purpose timers (3x at 0xF20000)
@@ -78,6 +79,7 @@
 - [x] Flash controller (0xE10000) - wait states, status registers
 
 ### 5b: Control Port Initialization Fixes ✓
+
 - [x] Fix CPU speed default: 6 MHz (0x00) instead of 48 MHz (0x03)
 - [x] Set PWR interrupt (bit 15) during reset
 - [x] Fix flash map_select default: 0x06 instead of 0x00
@@ -89,18 +91,21 @@
 - [x] Fix port 0x0F USB control to mask with 0x03 on write
 
 ### 5c: Missing Peripheral Stubs
+
 - [x] Watchdog timer (port 0x6) - basic stub
 - [x] RTC (port 0x8) - read-only stub returning safe values
 - [ ] SHA256 accelerator (port 0x2) - stub or full implementation
 - [x] SPI controller (port 0xD) - status stub returning reset values
 
 ### 5d: Boot Debugging ✓
+
 - [x] Compare execution trace with CEmu at divergence point
 - [x] Verify LDIR/block instructions execute during boot
 - [x] Trace why RAM isn't initialized (107 writes = stack only)
 - [x] Test with corrected control port defaults
 
 ### 5e: Visible OS Screen ✓
+
 - [x] ROM successfully copies code to RAM
 - [x] Execution continues past RAM initialization
 - [x] LCD shows boot screen or OS UI
@@ -109,6 +114,7 @@
 - [x] CPU reaches OS idle loop (EI + HALT at 0x085B7F)
 
 **Current Status (358 tests passing):**
+
 - **🎉 BOOT COMPLETE** - TI-84 CE OS boots to home screen with "RAM Cleared" message
 - Emulator runs to **3,609,969 steps** (~61.6M cycles) before normal OS HALT (idle wait)
 - LCD shows full OS UI: status bar "NORMAL FLOAT AUTO REAL RADIAN CL" + battery indicator
@@ -121,6 +127,7 @@
 - Flash command emulation for sector erase (80h sequence returns 80h status)
 
 ### 5f: CPU/Bus Fixes (Completed)
+
 - [x] Fixed L/IL suffix mode handling (eZ80 suffix opcodes)
 - [x] Fixed block instruction internal looping (LDIR, LDDR, CPIR, CPDR)
 - [x] Fixed eZ80 block I/O instructions (OTIMR, OTDMR, INIMR, INDMR)
@@ -136,6 +143,7 @@
 - [x] Fixed IM instruction mapping: eZ80 maps y value directly to IM mode (ED 56 = IM 2, not IM 1)
 
 **Key Progress:**
+
 - **🎉 MILESTONE 5 COMPLETE** - OS boots to visible home screen
 - Screen displays "RAM Cleared" message with full status bar
 - Execution trace matches CEmu for **1,000,000+ steps** (all available CEmu trace data)
@@ -144,6 +152,7 @@
 - VRAM filled with actual UI content (not just white pixels)
 
 **Debug Tool:**
+
 ```bash
 # All-in-one debug tool for testing and tracing
 cargo run --release --example debug -- help
@@ -157,6 +166,7 @@ cargo run --release --example debug -- compare <cemu_trace>  # Compare traces
 ```
 
 **Boot Success Verified:**
+
 - ROM boots in 3,609,969 steps (~61.6M cycles at 48MHz)
 - LCD control: 0x0000092D (16bpp RGB565, power on)
 - VRAM base: 0xD40000
@@ -187,11 +197,13 @@ cargo run --release --example debug -- compare <cemu_trace>  # Compare traces
 - [x] Screen shows "RAM Cleared" message after boot
 
 **Current Status:**
+
 - Android app displays the TI-84 CE boot screen correctly
 - ON key works to power on and wake from HALT
 - Regular keypad input still in progress (OS polling mechanism)
 
 ### 6a: Keypad Integration (In Progress)
+
 - [x] ON key (row 2, col 0) raises ON_KEY interrupt and wakes CPU
 - [x] any_key_wake signal for regular keys to wake from HALT
 - [x] Keypad data registers return live key state when polled
@@ -201,6 +213,7 @@ cargo run --release --example debug -- compare <cemu_trace>  # Compare traces
 - [ ] Key mappings are correct (currently displaying wrong values)
 
 **Key Findings:**
+
 - TI-OS polls keypad data registers (0xF50010-0xF5002F) rather than using interrupts
 - ON key uses dedicated ON_KEY interrupt (bit 0) which IS enabled
 - KEYPAD interrupt (bit 10) is NOT enabled by TI-OS

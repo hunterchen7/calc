@@ -519,6 +519,10 @@ impl Cpu {
                             if next == 0xED {
                                 self.execute_ed(bus)
                             } else {
+                                // Preserve suffix modes (L/IL) for the indexed instruction
+                                // See findings.md: suffix opcodes should apply to the entire
+                                // next instruction including any DD/FD prefixes
+                                self.suffix = true;
                                 self.prefix = 2;
                                 4
                             }
@@ -535,6 +539,10 @@ impl Cpu {
                             if next == 0xED {
                                 self.execute_ed(bus)
                             } else {
+                                // Preserve suffix modes (L/IL) for the indexed instruction
+                                // See findings.md: suffix opcodes should apply to the entire
+                                // next instruction including any DD/FD prefixes
+                                self.suffix = true;
                                 self.prefix = 3;
                                 4
                             }

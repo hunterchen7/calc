@@ -345,6 +345,25 @@ impl Emu {
                 }
             }
 
+            // Handle CPU_SIGNAL_ANY_KEY equivalent - call any_key_check before CPU executes
+            // This mirrors CEmu's main loop which calls keypad_any_check() when ANY_KEY signal is set
+            if self.cpu.any_key_wake {
+                let mode = self.bus.ports.keypad.mode();
+                log_event(&format!(
+                    "ANY_KEY_CHECK: mode={} halted={} iff1={}",
+                    mode, self.cpu.halted, self.cpu.iff1
+                ));
+                // Get key state for any_key_check
+                let key_state = self.bus.key_state().clone();
+                let should_interrupt = self.bus.ports.keypad.any_key_check(&key_state);
+                if should_interrupt {
+                    log_event("ANY_KEY_CHECK: raising keypad interrupt");
+                    // Raise keypad interrupt
+                    use crate::peripherals::interrupt::sources;
+                    self.bus.ports.interrupt.raise(sources::KEYPAD);
+                }
+            }
+
             // Execute one instruction
             let cycles_used = self.cpu.step(&mut self.bus);
 
@@ -363,7 +382,8 @@ impl Emu {
             self.process_scheduler_events();
 
             // Tick peripherals and check for interrupts
-            if self.bus.ports.tick(cycles_used) {
+            let tick_irq = self.bus.ports.tick(cycles_used);
+            if tick_irq {
                 self.cpu.irq_pending = true;
             }
 
@@ -425,6 +445,8 @@ impl Emu {
 
     /// Process any pending scheduler events
     fn process_scheduler_events(&mut self) {
+        use crate::peripherals::interrupt::sources;
+
         // Process all pending events
         while let Some(event) = self.scheduler.next_pending_event() {
             match event {
@@ -446,8 +468,40 @@ impl Emu {
                     // This is a stub for future scheduler integration
                     self.scheduler.clear(EventId::Spi);
                 }
+                EventId::Timer0 => {
+                    // Timer 0 fired - raise TIMER1 interrupt (timers are 1-indexed in interrupt controller)
+                    self.bus.ports.interrupt.raise(sources::TIMER1);
+                    self.cpu.irq_pending = self.bus.ports.interrupt.irq_pending();
+                    self.scheduler.clear(EventId::Timer0);
+                }
+                EventId::Timer1 => {
+                    // Timer 1 fired - raise TIMER2 interrupt
+                    self.bus.ports.interrupt.raise(sources::TIMER2);
+                    self.cpu.irq_pending = self.bus.ports.interrupt.irq_pending();
+                    self.scheduler.clear(EventId::Timer1);
+                }
+                EventId::Timer2 => {
+                    // Timer 2 fired - raise TIMER3 interrupt
+                    self.bus.ports.interrupt.raise(sources::TIMER3);
+                    self.cpu.irq_pending = self.bus.ports.interrupt.irq_pending();
+                    self.scheduler.clear(EventId::Timer2);
+                }
+                EventId::OsTimer => {
+                    // OS Timer fired - raise OSTIMER interrupt
+                    self.bus.ports.interrupt.raise(sources::OSTIMER);
+                    self.cpu.irq_pending = self.bus.ports.interrupt.irq_pending();
+                    // OS Timer auto-repeats, reschedule it
+                    // Note: the actual period is set by the timer peripheral
+                    self.scheduler.clear(EventId::OsTimer);
+                }
+                EventId::Lcd => {
+                    // LCD refresh - raise LCD interrupt
+                    self.bus.ports.interrupt.raise(sources::LCD);
+                    self.cpu.irq_pending = self.bus.ports.interrupt.irq_pending();
+                    self.scheduler.clear(EventId::Lcd);
+                }
                 _ => {
-                    // Other events not yet implemented
+                    // Unknown event - clear it
                     self.scheduler.clear(event);
                 }
             }
@@ -507,18 +561,13 @@ impl Emu {
             }
         } else {
             // Set key state and trigger any_key_check (like CEmu's CPU_SIGNAL_ANY_KEY handling)
-            // This updates keypad data registers and may raise a keypad interrupt
-            let keypad_irq = self.bus.set_key(row, col, down);
+            // This updates keypad data registers
+            self.bus.set_key(row, col, down);
 
             // Set any_key_wake signal to wake CPU from HALT
             // This allows keys to wake the CPU so the OS can poll the keypad
             if down {
                 self.cpu.any_key_wake = true;
-                // If keypad interrupt was raised, also set irq_pending
-                // This ensures the interrupt handler runs after wake
-                if keypad_irq {
-                    self.cpu.irq_pending = true;
-                }
             }
         }
     }
@@ -566,6 +615,11 @@ impl Emu {
     pub fn power_on(&mut self) {
         // Simulate the ON key being pressed (this is what turns on the calculator)
         self.press_on_key();
+    }
+
+    /// Get current keypad mode (for debugging)
+    pub fn keypad_mode(&self) -> u8 {
+        self.bus.ports.keypad.mode()
     }
 
     /// Render the current VRAM contents to the framebuffer

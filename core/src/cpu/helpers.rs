@@ -280,11 +280,10 @@ impl Cpu {
     }
 
     /// Exchange DE and HL
+    /// Note: EX DE,HL is a simple register swap - no L-mode masking
+    /// CEmu: EX(DE, cpu_read_index()) uses simple swap macro
     pub fn ex_de_hl(&mut self) {
-        let de = self.wrap_data(self.de);
-        let hl = self.wrap_data(self.hl);
-        self.de = hl;
-        self.hl = de;
+        std::mem::swap(&mut self.de, &mut self.hl);
     }
 
     // ========== Address Masking ==========
