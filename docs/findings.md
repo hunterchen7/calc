@@ -51,6 +51,45 @@ On the eZ80 (and in CEmu), block instructions like LDIR, LDDR, CPIR, CPDR execut
 
 **Impact**: Trace comparisons will show different step counts if iterations are counted differently. Also affects cycle counting.
 
+### Suffix Opcodes Execute Atomically with Following Instruction
+
+The eZ80 suffix opcodes (.SIS=0x40, .LIS=0x49, .SIL=0x52, .LIL=0x5B) modify the L/IL addressing modes for the **immediately following instruction** and execute atomically with it in a single step.
+
+| Suffix | Opcode | L (Data) | IL (Index) |
+|--------|--------|----------|------------|
+| .SIS   | 0x40   | 0 (short) | 0 (short) |
+| .LIS   | 0x49   | 0 (short) | 1 (long)  |
+| .SIL   | 0x52   | 1 (long)  | 0 (short) |
+| .LIL   | 0x5B   | 1 (long)  | 1 (long)  |
+
+**Key Behavior**: The suffix is NOT a separate instruction step. CEmu executes suffix + following instruction as one atomic operation. For trace comparison purposes, a `.LIL JP nn` sequence at PC=0x0003 should show as a single step that jumps to the target address.
+
+**What we tried that didn't work**:
+1. **Returning after suffix**: Initially, we returned from step() after the suffix, counting it as a separate instruction. This caused trace step count mismatches with CEmu.
+2. **Setting suffix flag in atomic loop**: When we fixed to use a loop (suffix sets L/IL, continue loop, execute next instruction), we initially set `self.suffix = true`. This caused the suffix flag to persist incorrectly when the following instruction was a DD/FD prefix, making the indexed instruction (in the NEXT step) incorrectly use the suffix modes.
+
+**Correct Implementation**:
+```rust
+loop {
+    let opcode = fetch_byte();
+    if is_suffix(opcode) {
+        // Set L/IL modes for this loop iteration only
+        self.l = suffix_l(opcode);
+        self.il = suffix_il(opcode);
+        // DO NOT set suffix=true - we handle it atomically here
+        continue;
+    }
+    execute(opcode);  // Executes with modified L/IL
+    break;
+}
+```
+
+**Impact**: Incorrect suffix handling causes:
+- Trace step count divergence from CEmu
+- If suffix flag persists incorrectly, it affects DD/FD indexed instructions, breaking boot
+
+**Source**: CEmu's cpu.c suffix handling in the main execution loop.
+
 ### BIT Preserves F3/F5 (Undocumented) Flags
 
 For CB-prefixed BIT instructions, CEmu preserves F3/F5 from the **previous** F register instead of deriving them from the tested operand or address.
