@@ -1,6 +1,16 @@
 # CEmu Backend Build Configuration
 # This file is included when USE_CEMU_BACKEND is ON
 
+# CRITICAL: Force release optimizations even in debug builds
+# Android CMake debug builds use -O0 by default which makes CEmu unusably slow
+# These MUST be set BEFORE any add_library() calls
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -DNDEBUG -ffast-math")
+set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -O3 -DNDEBUG")
+set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3 -DNDEBUG")
+
+# Enable LTO for better cross-file optimization
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+
 # Path to CEmu core source (from android/app/src/main/cpp -> project root)
 set(CEMU_CORE_DIR "${CMAKE_SOURCE_DIR}/../../../../../cemu-ref/core")
 
@@ -27,10 +37,11 @@ target_include_directories(cemucore PUBLIC
 )
 
 target_compile_options(cemucore PRIVATE
-    -Wall -Wextra -O3 -std=gnu11 -fPIC
+    -O3 -ffast-math -std=gnu11 -fPIC
     -Wno-unused-parameter
     -Wno-sign-compare
     -Wno-missing-field-initializers
+    -DNDEBUG
 )
 
 # CEmu adapter that provides our API
@@ -41,6 +52,10 @@ add_library(cemu_adapter STATIC
 target_include_directories(cemu_adapter PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CEMU_CORE_DIR}
+)
+
+target_compile_options(cemu_adapter PRIVATE
+    -O3 -ffast-math -DNDEBUG
 )
 
 target_link_libraries(cemu_adapter

@@ -41,6 +41,13 @@ android {
         }
     }
 
+    signingConfigs {
+        // Use debug key for release builds (for testing without a real keystore)
+        getByName("debug") {
+            // Uses default debug.keystore
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -48,6 +55,8 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // Sign with debug key for easy installation
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 

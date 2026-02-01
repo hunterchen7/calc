@@ -23,6 +23,23 @@
 #include <stdarg.h>
 #include <string.h>
 #include <stdbool.h>
+#include <time.h>
+
+// Timing stats (for performance debugging)
+static uint64_t g_run_time_ns = 0;
+static uint64_t g_draw_time_ns = 0;
+static uint64_t g_cpu_exec_count = 0;
+static uint64_t g_sched_time_ns = 0;
+static uint64_t g_cpu_time_ns = 0;
+static uint64_t g_signal_time_ns = 0;
+static int g_frame_count = 0;
+static int g_trace_enabled = 0;
+
+static uint64_t get_time_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
 
 // Tick conversion: at 48MHz, 160 base ticks = 1 CPU cycle
 #define TICKS_PER_CYCLE 160
@@ -89,16 +106,25 @@ void gui_debug_close(void) {}
 // Internal: run emulation loop
 static void cemu_run_internal(uint64_t ticks) {
     uint8_t signals;
+    uint64_t loop_count = 0;
+    uint64_t t1, t2;
+
     sched.run_event_triggered = false;
     sched_repeat(SCHED_RUN, ticks);
     while (!((signals = cpu_clear_signals()) & CPU_SIGNAL_EXIT)) {
+        t1 = get_time_ns();
         if (signals & CPU_SIGNAL_ON_KEY) {
             keypad_on_check();
         }
         if (signals & CPU_SIGNAL_ANY_KEY) {
             keypad_any_check();
         }
+        g_signal_time_ns += get_time_ns() - t1;
+
+        t1 = get_time_ns();
         sched_process_pending_events();
+        g_sched_time_ns += get_time_ns() - t1;
+
         if (signals & CPU_SIGNAL_RESET) {
             gui_console_printf("[CEmu] Reset triggered.\n");
             asic_reset();
@@ -106,7 +132,22 @@ static void cemu_run_internal(uint64_t ticks) {
         if (sched.run_event_triggered) {
             break;
         }
+
+        t1 = get_time_ns();
         cpu_execute();
+        t2 = get_time_ns();
+        g_cpu_time_ns += t2 - t1;
+
+        loop_count++;
+        g_cpu_exec_count++;
+    }
+
+    // Log detailed stats every 10 frames
+    if (g_trace_enabled && g_frame_count % 10 == 0) {
+        gui_console_printf("[Trace] loops=%llu, halted=%d, PC=0x%06X\n",
+            (unsigned long long)loop_count,
+            cpu.halted,
+            cpu.registers.PC);
     }
 }
 
@@ -267,8 +308,10 @@ int emu_run_cycles(Emu* emu, int cycles) {
         return 0;
     }
 
+    uint64_t start = get_time_ns();
     uint64_t ticks = (uint64_t)cycles * TICKS_PER_CYCLE;
     cemu_run_internal(ticks);
+    g_run_time_ns += get_time_ns() - start;
     return cycles;
 }
 
@@ -281,7 +324,34 @@ const uint32_t* emu_framebuffer(const Emu* emu, int* w, int* h) {
         return NULL;
     }
 
+    uint64_t start = get_time_ns();
     emu_lcd_drawframe(((struct Emu*)emu)->framebuffer);
+    g_draw_time_ns += get_time_ns() - start;
+    g_frame_count++;
+
+    // Log stats every 60 frames
+    if (g_frame_count >= 60) {
+        uint64_t cpu_per_frame = g_cpu_exec_count / 60;
+        uint64_t ns_per_exec = g_cpu_exec_count > 0 ? g_cpu_time_ns / g_cpu_exec_count : 0;
+        gui_console_printf("[Perf] 60fr: total=%llums, cpu=%llums, sched=%llums, sig=%llums, draw=%llums\n",
+            (unsigned long long)(g_run_time_ns / 1000000),
+            (unsigned long long)(g_cpu_time_ns / 1000000),
+            (unsigned long long)(g_sched_time_ns / 1000000),
+            (unsigned long long)(g_signal_time_ns / 1000000),
+            (unsigned long long)(g_draw_time_ns / 1000000));
+        gui_console_printf("[Perf] exec_calls/fr=%llu, ns/exec=%llu\n",
+            (unsigned long long)cpu_per_frame,
+            (unsigned long long)ns_per_exec);
+        g_run_time_ns = 0;
+        g_draw_time_ns = 0;
+        g_sched_time_ns = 0;
+        g_cpu_time_ns = 0;
+        g_signal_time_ns = 0;
+        g_cpu_exec_count = 0;
+        g_frame_count = 0;
+        g_trace_enabled = 1;  // Enable detailed trace after first perf log
+    }
+
     return emu->framebuffer;
 }
 

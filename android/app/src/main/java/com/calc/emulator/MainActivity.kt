@@ -60,7 +60,8 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val TAG = "MainActivity"
         // 48MHz / 60 FPS = 800,000 cycles per frame for real-time
-        const val CYCLES_PER_TICK = 800_000
+        // 2x to compensate for CEmu overhead on Android
+        const val CYCLES_PER_TICK = 1_600_000
         const val FRAME_INTERVAL_MS = 16L // ~60 FPS
     }
 
@@ -110,6 +111,9 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
     val logLines = remember { mutableStateListOf<String>() }
     var isLcdOn by remember { mutableStateOf(true) }
 
+    // Speed control (1x = 800K cycles, adjustable 1-10x)
+    var speedMultiplier by remember { mutableStateOf(2f) } // Default 2x for CEmu
+
     // Framebuffer bitmap
     val bitmap = remember {
         Bitmap.createBitmap(
@@ -154,15 +158,23 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
     // Emulation loop
     // TI-OS expression parser initialization is handled in the Rust core after boot.
     // See docs/findings.md "TI-OS Expression Parser Requires Initialization After Boot"
-    LaunchedEffect(isRunning) {
+    // Base cycles = 800K (real-time at 48MHz/60FPS), multiplied by speed setting
+    val cyclesPerTick = (800_000 * speedMultiplier).toInt()
+    LaunchedEffect(isRunning, speedMultiplier) {
         if (isRunning) {
             while (isRunning) {
+                val frameStart = System.nanoTime()
                 val executed = withContext(Dispatchers.Default) {
-                    emulator.runCycles(MainActivity.CYCLES_PER_TICK)
+                    emulator.runCycles(cyclesPerTick)
                 }
                 totalCyclesExecuted += executed
                 frameCounter++
-                delay(MainActivity.FRAME_INTERVAL_MS)
+                // Only delay remaining time to hit target frame rate
+                val elapsedMs = (System.nanoTime() - frameStart) / 1_000_000
+                val remainingMs = MainActivity.FRAME_INTERVAL_MS - elapsedMs
+                if (remainingMs > 0) {
+                    delay(remainingMs)
+                }
             }
         }
     }
@@ -207,6 +219,8 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
             totalCycles = totalCyclesExecuted,
             showDebug = showDebug,
             onToggleDebug = { showDebug = !showDebug },
+            speedMultiplier = speedMultiplier,
+            onSpeedChange = { speedMultiplier = it },
             lastKeyPress = lastKeyPress,
             logs = logLines,
             onKeyDown = { row, col ->
@@ -314,6 +328,8 @@ fun EmulatorView(
     totalCycles: Long,
     showDebug: Boolean,
     onToggleDebug: () -> Unit,
+    speedMultiplier: Float,
+    onSpeedChange: (Float) -> Unit,
     lastKeyPress: String,
     logs: List<String>,
     onKeyDown: (row: Int, col: Int) -> Unit,
@@ -412,6 +428,31 @@ fun EmulatorView(
                         unselectedContainerColor = Color.Transparent
                     ),
                     modifier = Modifier.padding(horizontal = 12.dp)
+                )
+
+                Divider(
+                    modifier = Modifier.padding(vertical = 8.dp),
+                    color = Color(0xFF333344)
+                )
+
+                // Speed control
+                Text(
+                    text = "Speed: ${speedMultiplier.toInt()}x",
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+                Slider(
+                    value = speedMultiplier,
+                    onValueChange = { onSpeedChange(it) },
+                    valueRange = 1f..10f,
+                    steps = 8,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color(0xFF4CAF50),
+                        activeTrackColor = Color(0xFF4CAF50),
+                        inactiveTrackColor = Color(0xFF333344)
+                    )
                 )
 
                 Spacer(modifier = Modifier.weight(1f))
