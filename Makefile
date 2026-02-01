@@ -1,6 +1,7 @@
 # TI-84 CE Emulator Build Commands
 
-.PHONY: android android-fast android-install log-android test clean
+.PHONY: android android-fast android-install log-android test clean \
+        cemu cemu-test cemu-clean
 
 # Build Android APK (all ABIs)
 android:
@@ -30,6 +31,26 @@ clean:
 	cd core && cargo clean
 	cd android && ./gradlew clean
 
+# CEmu backend (reference emulator)
+cemu:
+	@echo "Building CEmu core library..."
+	$(MAKE) -C cemu-ref/core lib
+	@echo "Building CEmu wrapper..."
+	$(MAKE) -C cemu-ref/test cemu_wrapper.o
+	@echo "CEmu library built: cemu-ref/core/libcemucore.a"
+
+cemu-test: cemu
+	@echo "Building CEmu test programs..."
+	$(MAKE) -C cemu-ref/test all
+	@echo ""
+	@echo "Run tests with:"
+	@echo "  cd cemu-ref/test && ./test_cemu 'path/to/TI-84 CE.rom'"
+	@echo "  cd cemu-ref/test && ./test_wrapper 'path/to/TI-84 CE.rom'"
+
+cemu-clean:
+	$(MAKE) -C cemu-ref/core clean
+	$(MAKE) -C cemu-ref/test clean
+
 # Help
 help:
 	@echo "Available targets:"
@@ -39,3 +60,8 @@ help:
 	@echo "  make log-android    - Capture emulator logs to emulator_logs.txt"
 	@echo "  make test           - Run Rust tests"
 	@echo "  make clean          - Clean all build artifacts"
+	@echo ""
+	@echo "CEmu backend (reference emulator):"
+	@echo "  make cemu           - Build CEmu library for macOS"
+	@echo "  make cemu-test      - Build CEmu test programs"
+	@echo "  make cemu-clean     - Clean CEmu build artifacts"
