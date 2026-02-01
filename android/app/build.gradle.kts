@@ -28,6 +28,10 @@ android {
             cmake {
                 cppFlags += "-std=c++17"
                 arguments += "-DANDROID_STL=c++_shared"
+                // Support CEmu backend via: ./gradlew assembleDebug -PuseCemu=true
+                if (project.hasProperty("useCemu") && project.property("useCemu") == "true") {
+                    arguments += "-DUSE_CEMU_BACKEND=ON"
+                }
             }
         }
     }

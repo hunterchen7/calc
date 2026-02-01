@@ -1,7 +1,7 @@
 # TI-84 CE Emulator Build Commands
 
-.PHONY: android android-fast android-install log-android test clean \
-        cemu cemu-test cemu-clean
+.PHONY: android android-fast android-install android-cemu android-cemu-install \
+        log-android test clean cemu cemu-test cemu-clean
 
 # Build Android APK (all ABIs)
 android:
@@ -14,6 +14,14 @@ android-fast:
 # Build all ABIs and install
 android-install:
 	./scripts/build-android.sh --install
+
+# Build Android APK using CEmu backend
+android-cemu:
+	./scripts/build-android-cemu.sh
+
+# Build and install Android APK using CEmu backend
+android-cemu-install:
+	./scripts/build-android-cemu.sh --install
 
 # Capture Android emulator logs to file
 log-android:
@@ -54,14 +62,16 @@ cemu-clean:
 # Help
 help:
 	@echo "Available targets:"
-	@echo "  make android        - Build APK for all Android ABIs"
-	@echo "  make android-fast   - Build arm64 only + install (fastest)"
-	@echo "  make android-install- Build all ABIs + install"
-	@echo "  make log-android    - Capture emulator logs to emulator_logs.txt"
-	@echo "  make test           - Run Rust tests"
-	@echo "  make clean          - Clean all build artifacts"
+	@echo "  make android             - Build APK for all Android ABIs (Rust)"
+	@echo "  make android-fast        - Build arm64 only + install (Rust)"
+	@echo "  make android-install     - Build all ABIs + install (Rust)"
+	@echo "  make android-cemu        - Build APK using CEmu backend"
+	@echo "  make android-cemu-install- Build + install using CEmu backend"
+	@echo "  make log-android         - Capture emulator logs to emulator_logs.txt"
+	@echo "  make test                - Run Rust tests"
+	@echo "  make clean               - Clean all build artifacts"
 	@echo ""
-	@echo "CEmu backend (reference emulator):"
-	@echo "  make cemu           - Build CEmu library for macOS"
-	@echo "  make cemu-test      - Build CEmu test programs"
-	@echo "  make cemu-clean     - Clean CEmu build artifacts"
+	@echo "CEmu backend (reference emulator for macOS):"
+	@echo "  make cemu                - Build CEmu library for macOS"
+	@echo "  make cemu-test           - Build CEmu test programs"
+	@echo "  make cemu-clean          - Clean CEmu build artifacts"
