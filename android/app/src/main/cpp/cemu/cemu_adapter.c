@@ -3,6 +3,11 @@
  *
  * Wraps CEmu's global-state API to provide instance-based interface.
  * Since emu.c has conflicting function names, we implement needed functionality here.
+ *
+ * Performance Note:
+ * Define CEMU_PERF_INSTRUMENTATION to enable timing instrumentation.
+ * This adds significant overhead (6+ syscalls per loop iteration) and should
+ * only be used for debugging performance issues.
  */
 #include "emu.h"  // Our adapter header
 
@@ -23,6 +28,8 @@
 #include <stdarg.h>
 #include <string.h>
 #include <stdbool.h>
+
+#ifdef CEMU_PERF_INSTRUMENTATION
 #include <time.h>
 
 // Timing stats (for performance debugging)
@@ -40,6 +47,7 @@ static uint64_t get_time_ns(void) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
+#endif /* CEMU_PERF_INSTRUMENTATION */
 
 // Tick conversion: at 48MHz, 160 base ticks = 1 CPU cycle
 #define TICKS_PER_CYCLE 160
@@ -106,24 +114,32 @@ void gui_debug_close(void) {}
 // Internal: run emulation loop
 static void cemu_run_internal(uint64_t ticks) {
     uint8_t signals;
+#ifdef CEMU_PERF_INSTRUMENTATION
     uint64_t loop_count = 0;
     uint64_t t1, t2;
+#endif
 
     sched.run_event_triggered = false;
     sched_repeat(SCHED_RUN, ticks);
     while (!((signals = cpu_clear_signals()) & CPU_SIGNAL_EXIT)) {
+#ifdef CEMU_PERF_INSTRUMENTATION
         t1 = get_time_ns();
+#endif
         if (signals & CPU_SIGNAL_ON_KEY) {
             keypad_on_check();
         }
         if (signals & CPU_SIGNAL_ANY_KEY) {
             keypad_any_check();
         }
+#ifdef CEMU_PERF_INSTRUMENTATION
         g_signal_time_ns += get_time_ns() - t1;
 
         t1 = get_time_ns();
+#endif
         sched_process_pending_events();
+#ifdef CEMU_PERF_INSTRUMENTATION
         g_sched_time_ns += get_time_ns() - t1;
+#endif
 
         if (signals & CPU_SIGNAL_RESET) {
             gui_console_printf("[CEmu] Reset triggered.\n");
@@ -133,15 +149,20 @@ static void cemu_run_internal(uint64_t ticks) {
             break;
         }
 
+#ifdef CEMU_PERF_INSTRUMENTATION
         t1 = get_time_ns();
+#endif
         cpu_execute();
+#ifdef CEMU_PERF_INSTRUMENTATION
         t2 = get_time_ns();
         g_cpu_time_ns += t2 - t1;
 
         loop_count++;
         g_cpu_exec_count++;
+#endif
     }
 
+#ifdef CEMU_PERF_INSTRUMENTATION
     // Log detailed stats every 10 frames
     if (g_trace_enabled && g_frame_count % 10 == 0) {
         gui_console_printf("[Trace] loops=%llu, halted=%d, PC=0x%06X\n",
@@ -149,6 +170,7 @@ static void cemu_run_internal(uint64_t ticks) {
             cpu.halted,
             cpu.registers.PC);
     }
+#endif
 }
 
 // Internal: load ROM from memory buffer (no temp file needed)
@@ -308,10 +330,14 @@ int emu_run_cycles(Emu* emu, int cycles) {
         return 0;
     }
 
+#ifdef CEMU_PERF_INSTRUMENTATION
     uint64_t start = get_time_ns();
+#endif
     uint64_t ticks = (uint64_t)cycles * TICKS_PER_CYCLE;
     cemu_run_internal(ticks);
+#ifdef CEMU_PERF_INSTRUMENTATION
     g_run_time_ns += get_time_ns() - start;
+#endif
     return cycles;
 }
 
@@ -324,8 +350,11 @@ const uint32_t* emu_framebuffer(const Emu* emu, int* w, int* h) {
         return NULL;
     }
 
+#ifdef CEMU_PERF_INSTRUMENTATION
     uint64_t start = get_time_ns();
+#endif
     emu_lcd_drawframe(((struct Emu*)emu)->framebuffer);
+#ifdef CEMU_PERF_INSTRUMENTATION
     g_draw_time_ns += get_time_ns() - start;
     g_frame_count++;
 
@@ -351,6 +380,7 @@ const uint32_t* emu_framebuffer(const Emu* emu, int* w, int* h) {
         g_frame_count = 0;
         g_trace_enabled = 1;  // Enable detailed trace after first perf log
     }
+#endif
 
     return emu->framebuffer;
 }

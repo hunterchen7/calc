@@ -1,6 +1,10 @@
 # CEmu Backend Build Configuration
 # This file is included when USE_CEMU_BACKEND is ON
 
+# Option to enable performance instrumentation (adds significant overhead)
+# Use only for debugging performance issues
+option(CEMU_PERF_INSTRUMENTATION "Enable timing instrumentation in CEmu adapter (adds overhead)" OFF)
+
 # CRITICAL: Force release optimizations even in debug builds
 # Android CMake debug builds use -O0 by default which makes CEmu unusably slow
 # These MUST be set BEFORE any add_library() calls
@@ -57,6 +61,12 @@ target_include_directories(cemu_adapter PUBLIC
 target_compile_options(cemu_adapter PRIVATE
     -O3 -ffast-math -DNDEBUG
 )
+
+# Enable performance instrumentation if requested (adds ~6 syscalls per loop iteration)
+if(CEMU_PERF_INSTRUMENTATION)
+    message(STATUS "CEmu performance instrumentation ENABLED (debug only)")
+    target_compile_definitions(cemu_adapter PRIVATE CEMU_PERF_INSTRUMENTATION)
+endif()
 
 target_link_libraries(cemu_adapter
     cemucore

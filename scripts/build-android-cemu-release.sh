@@ -1,12 +1,29 @@
 #!/bin/bash
 # Release Android build using CEmu backend - arm64 only, auto-installs
 # Full optimizations, no debug overhead
-# Usage: ./scripts/build-android-cemu-release.sh
+# Usage: ./scripts/build-android-cemu-release.sh [--perf]
+#   --perf  Enable performance instrumentation (adds overhead, for debugging only)
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Parse arguments
+PERF_FLAG=""
+for arg in "$@"; do
+    case $arg in
+        --perf)
+            PERF_FLAG="-DCEMU_PERF_INSTRUMENTATION=ON"
+            echo "==> Performance instrumentation ENABLED (debug mode)"
+            ;;
+        *)
+            echo "Unknown option: $arg"
+            echo "Usage: $0 [--perf]"
+            exit 1
+            ;;
+    esac
+done
 
 cd "$PROJECT_ROOT"
 
@@ -25,9 +42,16 @@ cd android
 rm -rf app/.cxx app/build/intermediates/cmake
 
 # Build release with CEmu backend flag, arm64 only
-./gradlew assembleRelease \
-    -PuseCemu=true \
-    -PabiFilters=arm64-v8a
+if [ -n "$PERF_FLAG" ]; then
+    ./gradlew assembleRelease \
+        -PuseCemu=true \
+        -PabiFilters=arm64-v8a \
+        -PcmakeArgs="$PERF_FLAG"
+else
+    ./gradlew assembleRelease \
+        -PuseCemu=true \
+        -PabiFilters=arm64-v8a
+fi
 
 echo "==> Installing APK..."
 adb install -r app/build/outputs/apk/release/app-release-unsigned.apk 2>/dev/null || \
