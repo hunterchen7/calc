@@ -19,6 +19,15 @@ calc/
 - Android Studio with NDK
 - Android SDK (API 24+)
 
+### Quick Build Commands
+
+```bash
+make android-fast      # Build arm64 + install (fastest for development)
+make android           # Build all ABIs
+make test              # Run Rust tests
+make help              # Show all available commands
+```
+
 ### Core (Rust)
 
 ```bash
@@ -74,6 +83,35 @@ cd core && cargo build --target aarch64-linux-android --release
 ```
 
 The `watch.sh` script requires `fswatch` (`brew install fswatch`).
+
+### CEmu Backend (Alternative)
+
+For debugging or comparison, you can build the Android app using the [CEmu](https://github.com/CE-Programming/CEmu) reference emulator instead of our Rust implementation.
+
+**Setup:**
+
+```bash
+# Clone CEmu (one-time setup, gitignored)
+git clone https://github.com/CE-Programming/CEmu.git cemu-ref
+```
+
+**Build with CEmu:**
+
+```bash
+make android-cemu-fast      # Build arm64 + install using CEmu backend
+```
+
+**Local testing (macOS):**
+
+```bash
+make cemu-test              # Build CEmu test programs
+cd cemu-ref/test && ./test_wrapper "../../../TI-84 CE.rom"
+```
+
+This is useful for:
+- Verifying behavior differences between implementations
+- Debugging issues by comparing against the reference emulator
+- Testing on devices while the Rust implementation is being developed
 
 ## Testing
 

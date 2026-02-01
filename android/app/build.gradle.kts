@@ -21,14 +21,30 @@ android {
         }
 
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+            // Support ABI override via: ./gradlew assembleDebug -PabiFilters=arm64-v8a
+            if (project.hasProperty("abiFilters")) {
+                abiFilters += project.property("abiFilters").toString().split(",")
+            } else {
+                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+            }
         }
 
         externalNativeBuild {
             cmake {
                 cppFlags += "-std=c++17"
                 arguments += "-DANDROID_STL=c++_shared"
+                // Support CEmu backend via: ./gradlew assembleDebug -PuseCemu=true
+                if (project.hasProperty("useCemu") && project.property("useCemu") == "true") {
+                    arguments += "-DUSE_CEMU_BACKEND=ON"
+                }
             }
+        }
+    }
+
+    signingConfigs {
+        // Use debug key for release builds (for testing without a real keystore)
+        getByName("debug") {
+            // Uses default debug.keystore
         }
     }
 
@@ -39,6 +55,8 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // Sign with debug key for easy installation
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
