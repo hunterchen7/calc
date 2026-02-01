@@ -4,6 +4,7 @@
 
 use crate::bus::Bus;
 use crate::cpu::{Cpu, InterruptMode};
+use crate::peripherals::rtc::LATCH_TICK_OFFSET;
 use crate::scheduler::{EventId, Scheduler};
 use std::ffi::CString;
 use std::fs::OpenOptions;
@@ -378,10 +379,12 @@ impl Emu {
 
             // Check if RTC needs a load event scheduled
             if self.bus.ports.rtc.needs_load_scheduled() && !self.scheduler.is_active(EventId::Rtc) {
-                // Start the load ticks and schedule the first event
-                self.bus.ports.rtc.start_load_ticks();
-                // Schedule first tick at 32kHz (1 tick)
-                self.scheduler.set(EventId::Rtc, 1);
+                // Don't call start_load_ticks() here - keep loadTicksProcessed at LOAD_PENDING
+                // The scheduler event will call advance_load() which handles the transition
+                //
+                // CEmu delays load processing until LATCH event fires (16429 ticks at 32 kHz)
+                // This ensures load stays pending for ~24M cycles at 48 MHz
+                self.scheduler.set(EventId::Rtc, LATCH_TICK_OFFSET);
             }
 
             // Don't return early when halted - peripherals need to keep ticking!
@@ -424,8 +427,12 @@ impl Emu {
             }
 
             if self.bus.ports.rtc.needs_load_scheduled() && !self.scheduler.is_active(EventId::Rtc) {
-                self.bus.ports.rtc.start_load_ticks();
-                self.scheduler.set(EventId::Rtc, 1);
+                // Don't call start_load_ticks() here - keep loadTicksProcessed at LOAD_PENDING
+                // The scheduler event will call advance_load() which handles the transition
+                //
+                // CEmu delays load processing until LATCH event fires (16429 ticks at 32 kHz)
+                // This ensures load stays pending for ~24M cycles at 48 MHz
+                self.scheduler.set(EventId::Rtc, LATCH_TICK_OFFSET);
             }
         }
 

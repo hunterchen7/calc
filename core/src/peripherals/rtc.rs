@@ -8,6 +8,11 @@
 //! The RTC uses a 32.768 kHz clock for load timing. When a load is triggered,
 //! it takes ~51 ticks (LOAD_TOTAL_TICKS) to complete loading all datetime fields.
 
+/// Number of bits for time fields (8 bits each for sec, min, hour)
+const RTC_TIME_BITS: u8 = 8 * 3; // 24 bits
+/// Number of bits for all datetime fields (time + 16-bit day)
+const RTC_DATETIME_BITS: u8 = RTC_TIME_BITS + 16; // 40 bits
+
 /// Load status gets set 1 tick after each load completes (from CEmu)
 /// These are the tick counts at which each field finishes loading
 const LOAD_SEC_FINISHED: u8 = 1 + 8;      // 9 ticks for seconds
@@ -18,6 +23,9 @@ const LOAD_DAY_FINISHED: u8 = LOAD_HOUR_FINISHED + 16; // 41 ticks for day
 pub const LOAD_TOTAL_TICKS: u8 = LOAD_DAY_FINISHED + 10; // 51 ticks total
 /// LOAD_PENDING = 255 (UINT8_MAX in CEmu) - indicates load just started
 const LOAD_PENDING: u8 = 255;
+
+/// Delay in 32kHz ticks before RTC latch event fires (hardware-specific magic number from CEmu)
+pub const LATCH_TICK_OFFSET: u64 = 16429;
 
 /// RTC Controller
 #[derive(Debug, Clone)]
@@ -145,52 +153,17 @@ impl RtcController {
         }
     }
 
-    /// Simulate load progress based on elapsed CPU cycles
+    /// Check/update load status
     ///
-    /// CEmu uses a scheduler-based system with sched_ticks_remaining() to track
-    /// load progress. We calculate elapsed RTC ticks from CPU cycles instead.
+    /// CEmu uses a scheduler-based system where load only progresses via
+    /// scheduler events. We mirror this behavior - load only advances via
+    /// advance_load() called by the scheduler, not based on CPU cycles.
     ///
-    /// RTC runs at 32.768 kHz. CPU cycles per RTC tick varies by CPU speed:
-    /// - 6 MHz (speed 0): 6,000,000 / 32,768 = ~183 cycles
-    /// - 12 MHz (speed 1): 12,000,000 / 32,768 = ~366 cycles
-    /// - 24 MHz (speed 2): 24,000,000 / 32,768 = ~732 cycles
-    /// - 48 MHz (speed 3): 48,000,000 / 32,768 = ~1465 cycles
-    fn update_load(&mut self, current_cycles: u64, cpu_speed: u8) {
-        // If load is complete, nothing to do
-        if self.load_ticks_processed >= LOAD_TOTAL_TICKS {
-            return;
-        }
-
-        // Calculate elapsed RTC ticks since load started
-        if let Some(start_cycle) = self.load_start_cycle {
-            // CPU cycles per RTC tick based on speed
-            let cycles_per_rtc_tick: u64 = match cpu_speed {
-                0 => 183,   // 6 MHz
-                1 => 366,   // 12 MHz
-                2 => 732,   // 24 MHz
-                _ => 1465,  // 48 MHz (default)
-            };
-
-            let elapsed_cycles = current_cycles.saturating_sub(start_cycle);
-            let elapsed_rtc_ticks = elapsed_cycles / cycles_per_rtc_tick;
-
-            // Update load progress (capped at LOAD_TOTAL_TICKS)
-            let new_ticks = elapsed_rtc_ticks.min(LOAD_TOTAL_TICKS as u64) as u8;
-
-            // Handle transition from LOAD_PENDING (255) to actual tick count
-            // LOAD_PENDING as i8 is -1, so any non-negative elapsed ticks is an advancement
-            if self.load_ticks_processed == LOAD_PENDING {
-                // Transition from pending to counting
-                self.load_ticks_processed = new_ticks;
-            } else if new_ticks > self.load_ticks_processed {
-                self.load_ticks_processed = new_ticks;
-            }
-
-            // Clear load bit when complete
-            if self.load_ticks_processed >= LOAD_TOTAL_TICKS {
-                self.control &= !0x40;
-            }
-        }
+    /// This function is called on reads but doesn't advance the load.
+    fn update_load(&mut self, _current_cycles: u64, _cpu_speed: u8) {
+        // Load only advances via scheduler events (advance_load)
+        // This function is kept for API compatibility but is essentially a no-op
+        // The scheduler will call advance_load() at the appropriate times
     }
 
     /// Write a register byte
@@ -213,8 +186,8 @@ impl RtcController {
                     self.update_load(current_cycles, cpu_speed);
                     if self.control & 0x40 == 0 {
                         // Load can be pended once previous load is finished
-                        // Previous load is finished when load_ticks_processed >= RTC_DATETIME_BITS (40)
-                        if self.load_ticks_processed >= 40 {
+                        // Previous load is finished when load_ticks_processed >= RTC_DATETIME_BITS
+                        if self.load_ticks_processed >= RTC_DATETIME_BITS {
                             self.load_ticks_processed = LOAD_PENDING;
                             // Record when load started for timing calculation
                             self.load_start_cycle = Some(current_cycles);
@@ -263,9 +236,9 @@ impl RtcController {
         } else if self.load_ticks_processed < LOAD_TOTAL_TICKS {
             self.load_ticks_processed += 1;
 
-            // Check if load just completed
-            if self.load_ticks_processed >= LOAD_TOTAL_TICKS {
-                // Clear the load bit in control register
+            // Check if datetime bits are all loaded (matches CEmu's timing)
+            // Load bit is cleared at 40 ticks (RTC_DATETIME_BITS), not 51
+            if self.load_ticks_processed >= RTC_DATETIME_BITS {
                 self.control &= !0x40;
             }
         }
