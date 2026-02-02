@@ -250,8 +250,8 @@ cargo run --release --example debug -- compare <cemu_trace>  # Compare traces
 **Deliverables:**
 
 - [ ] Flash write/erase behavior
-- [ ] Rust backend: Save flash in state (currently RAM-only; needed for user programs)
-- [x] Save-state buffer APIs (Rust: ~416KB RAM-only, CEmu: ~4.5MB with flash)
+- [x] Rust backend: Save flash in state (now includes 4MB flash)
+- [x] Save-state buffer APIs (Rust: ~4.5MB with flash, CEmu: ~4.5MB)
 - [x] iOS save/load state (Rust backend)
 - [x] iOS save/load state (CEmu backend)
 - [ ] Android save/load state
