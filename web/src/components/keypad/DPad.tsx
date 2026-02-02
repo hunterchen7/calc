@@ -33,7 +33,6 @@ const BORDER_COLOR = '#B5B5B5';
 const ARROW_COLOR = '#2B2B2B';
 const GAP_COLOR = '#1B1B1B';
 const CENTER_COLOR = '#1B1B1B';
-const CENTER_DOT_COLOR = '#595959';
 
 // Configuration
 const SWEEP_ANGLE = 90;
