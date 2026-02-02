@@ -25,6 +25,7 @@ static INST_TRACE_ARMED: AtomicBool = AtomicBool::new(false);
 static INST_TRACE_ARMED_LIMIT: AtomicU32 = AtomicU32::new(0);
 
 /// Enable instruction tracing (logs every instruction to log callback)
+#[allow(dead_code)]
 pub fn enable_inst_trace(limit: u32) {
     INST_TRACE_COUNT.store(0, Ordering::SeqCst);
     INST_TRACE_LIMIT.store(limit, Ordering::SeqCst);
@@ -34,6 +35,7 @@ pub fn enable_inst_trace(limit: u32) {
 
 /// Arm instruction tracing to start when CPU wakes from HALT
 /// This avoids tracing HALT loops - only traces after wake event
+#[allow(dead_code)]
 pub fn arm_inst_trace_on_wake(limit: u32) {
     INST_TRACE_ARMED_LIMIT.store(limit, Ordering::SeqCst);
     INST_TRACE_ARMED.store(true, Ordering::SeqCst);
@@ -41,6 +43,7 @@ pub fn arm_inst_trace_on_wake(limit: u32) {
 }
 
 /// Disable instruction tracing
+#[allow(dead_code)]
 pub fn disable_inst_trace() {
     INST_TRACE_ENABLED.store(false, Ordering::SeqCst);
     INST_TRACE_ARMED.store(false, Ordering::SeqCst);
@@ -48,6 +51,7 @@ pub fn disable_inst_trace() {
 }
 
 /// Check if instruction tracing is enabled
+#[allow(dead_code)]
 pub fn is_inst_trace_enabled() -> bool {
     INST_TRACE_ENABLED.load(Ordering::Relaxed)
 }

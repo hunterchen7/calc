@@ -57,7 +57,9 @@ const WATCHDOG_BASE: u32 = 0x160000; // 0xF60000
 const WATCHDOG_END: u32 = 0x160100;
 const RTC_BASE: u32 = 0x180000; // 0xF80000
 const RTC_END: u32 = 0x180100;
+#[allow(dead_code)]
 const BACKLIGHT_BASE: u32 = 0x1B0000; // 0xFB0000
+#[allow(dead_code)]
 const BACKLIGHT_END: u32 = 0x1B0100;
 
 /// Peripheral subsystem containing all hardware controllers
@@ -308,6 +310,7 @@ impl Peripherals {
 
                 // DIAGNOSTIC: Unconditional log to see if writes go through here
                 static mut WRITE_COUNT: u32 = 0;
+                #[allow(static_mut_refs)]
                 unsafe {
                     WRITE_COUNT += 1;
                     if WRITE_COUNT % 10000 == 1 {
@@ -427,6 +430,7 @@ impl Peripherals {
 
         // Debug: OS Timer state tracking
         static mut OS_TIMER_DEBUG_COUNT: u64 = 0;
+        #[allow(static_mut_refs)]
         unsafe {
             OS_TIMER_DEBUG_COUNT += 1;
             if OS_TIMER_DEBUG_COUNT % 5000000 == 1 {
