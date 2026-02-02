@@ -773,6 +773,9 @@ impl Emu {
 
     /// Save emulator state to buffer
     /// Returns number of bytes written on success
+    // TODO: Save flash memory to support user programs and modified OS (Milestone 9)
+    // Currently only RAM is saved; flash is restored from the original ROM file.
+    // CEmu saves flash (~4MB) which is why its state files are much larger (~4.5MB vs ~416KB).
     pub fn save_state(&self, buffer: &mut [u8]) -> Result<usize, i32> {
         use crate::cpu::Cpu;
         use crate::memory::addr::RAM_SIZE;
