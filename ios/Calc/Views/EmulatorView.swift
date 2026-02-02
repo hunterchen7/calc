@@ -158,15 +158,15 @@ struct EmulatorView: View {
 
                 // Speed control
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Speed: \(Int(state.speedMultiplier))x")
+                    Text("Speed: \(String(format: state.speedMultiplier >= 1 ? "%.0fx" : "%.2fx", state.speedMultiplier))")
                         .font(.system(size: 14))
                         .foregroundColor(.white)
                         .padding(.horizontal, 16)
 
                     Slider(
                         value: $state.speedMultiplier,
-                        in: 1...10,
-                        step: 1
+                        in: 0.25...5,
+                        step: 0.25
                     )
                     .tint(Color(red: 0.298, green: 0.686, blue: 0.314))
                     .padding(.horizontal, 16)
