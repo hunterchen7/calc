@@ -87,10 +87,10 @@ web-cemu:
 		echo "Cloning CEmu reference repository..."; \
 		git clone --depth 1 https://github.com/CE-Programming/CEmu.git cemu-ref; \
 	fi
-	$(MAKE) -C cemu-ref/core -f emscripten.mk wasm
+	$(MAKE) -C web -f cemu-emscripten.mk wasm
 	@echo "Copying CEmu WASM to web app..."
 	mkdir -p web/src/cemu-core
-	cp cemu-ref/core/WebCEmu.js cemu-ref/core/WebCEmu.wasm web/src/cemu-core/
+	cp web/build-cemu/WebCEmu.js web/build-cemu/WebCEmu.wasm web/src/cemu-core/
 	@echo ""
 	@echo "CEmu WASM built! Files in web/src/cemu-core/"
 	@echo "Note: Web UI integration for CEmu backend not yet implemented"

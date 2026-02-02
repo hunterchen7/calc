@@ -11,6 +11,8 @@ node_modules
 dist
 dist-ssr
 src/emu-core
+src/cemu-core
+build-cemu
 *.local
 
 # Editor directories and files
