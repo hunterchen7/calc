@@ -93,10 +93,12 @@ static void emu_log_callback(const char* message) {
 
 // Load a backend by name
 static bool loadBackend(const std::string& backendName) {
-    std::string libPath = g_native_lib_dir + "/libemu_" + backendName + ".so";
-    LOGI("Loading backend: %s from %s", backendName.c_str(), libPath.c_str());
+    // Use just the library name, not full path. Android's linker will find it
+    // since System.loadLibrary already loaded it from the APK.
+    std::string libName = "libemu_" + backendName + ".so";
+    LOGI("Loading backend: %s (%s)", backendName.c_str(), libName.c_str());
 
-    void* handle = dlopen(libPath.c_str(), RTLD_NOW | RTLD_LOCAL);
+    void* handle = dlopen(libName.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
         LOGE("Failed to load backend %s: %s", backendName.c_str(), dlerror());
         return false;
