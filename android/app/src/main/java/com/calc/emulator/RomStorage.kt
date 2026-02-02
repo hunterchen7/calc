@@ -12,8 +12,43 @@ object RomStorage {
     private const val TAG = "RomStorage"
     private const val PREFS_NAME = "emulator_prefs"
     private const val KEY_ROM_FILENAME = "last_rom_filename"
+    private const val KEY_APP_VERSION = "last_app_version"
     private const val ROM_DIR = "roms"
     private const val STATE_FILENAME = "emulator.state"
+
+    /**
+     * Check if this is a fresh install or version change, and clear data if so.
+     */
+    @Suppress("DEPRECATION")
+    fun clearDataOnVersionChange(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+        val currentVersion = packageInfo.versionCode.toString()
+        val savedVersion = prefs.getString(KEY_APP_VERSION, null)
+
+        if (savedVersion != currentVersion) {
+            Log.i(TAG, "Version changed from $savedVersion to $currentVersion, clearing data")
+            clearAllData(context)
+            prefs.edit().putString(KEY_APP_VERSION, currentVersion).apply()
+        }
+    }
+
+    /**
+     * Clear all saved ROM and state data.
+     */
+    fun clearAllData(context: Context) {
+        clearSavedState(context)
+        clearSavedRom(context)
+
+        // Delete ROM directory contents
+        val romDir = File(context.filesDir, ROM_DIR)
+        if (romDir.exists()) {
+            romDir.listFiles()?.forEach { file ->
+                file.delete()
+            }
+            Log.i(TAG, "Cleared all ROM files")
+        }
+    }
 
     /**
      * Save ROM data to internal storage and remember it.

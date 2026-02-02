@@ -14,6 +14,39 @@ struct RomStorage {
     private static let logger = Logger(subsystem: "com.calc.emulator", category: "RomStorage")
     private static let romFilenameKey = "lastRomFilename"
     private static let romDirName = "roms"
+    private static let appVersionKey = "lastAppVersion"
+
+    /// Check if this is a fresh install or version change, and clear data if so
+    static func clearDataOnVersionChange() {
+        let currentVersion = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
+        let savedVersion = UserDefaults.standard.string(forKey: appVersionKey)
+
+        if savedVersion != currentVersion {
+            logger.info("Version changed from \(savedVersion ?? "nil") to \(currentVersion), clearing data")
+            clearAllData()
+            UserDefaults.standard.set(currentVersion, forKey: appVersionKey)
+        }
+    }
+
+    /// Clear all saved ROM and state data
+    static func clearAllData() {
+        clearSavedState()
+        clearSavedRom()
+
+        // Delete ROM directory contents
+        if let romDir = romDirectory {
+            let fileManager = FileManager.default
+            do {
+                let files = try fileManager.contentsOfDirectory(at: romDir, includingPropertiesForKeys: nil)
+                for file in files {
+                    try fileManager.removeItem(at: file)
+                }
+                logger.info("Cleared all ROM files")
+            } catch {
+                logger.error("Failed to clear ROM files: \(error.localizedDescription)")
+            }
+        }
+    }
 
     /// Get the ROM storage directory, creating it if needed
     private static var romDirectory: URL? {

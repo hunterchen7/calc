@@ -28,6 +28,9 @@ struct ContentView: View {
             }
         }
         .onAppear {
+            // Clear data on fresh install or version change
+            RomStorage.clearDataOnVersionChange()
+
             _ = state.emulator.create()
             // Try to load saved ROM and state on launch
             state.tryLoadSavedRom()

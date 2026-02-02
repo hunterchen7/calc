@@ -178,8 +178,10 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
         }
     }
 
-    // Try to load saved ROM on first launch
+    // Clear data on fresh install or version change, then try to load saved ROM
     LaunchedEffect(Unit) {
+        RomStorage.clearDataOnVersionChange(context)
+
         if (!romLoaded) {
             RomStorage.loadSavedRom(context)?.let { (bytes, name) ->
                 loadRomBytes(bytes, name, saveToStorage = false, tryLoadState = true)
