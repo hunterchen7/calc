@@ -582,7 +582,7 @@ fun EmulatorView(
 
                 // Speed control
                 Text(
-                    text = "Speed: ${speedMultiplier.toInt()}x",
+                    text = "Speed: ${if (speedMultiplier >= 1f) "${speedMultiplier.toInt()}x" else String.format("%.2fx", speedMultiplier)}",
                     color = Color.White,
                     fontSize = 14.sp,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
@@ -590,8 +590,8 @@ fun EmulatorView(
                 Slider(
                     value = speedMultiplier,
                     onValueChange = { onSpeedChange(it) },
-                    valueRange = 1f..10f,
-                    steps = 8,
+                    valueRange = 0.25f..5f,
+                    steps = 18,  // (5 - 0.25) / 0.25 - 1 = 18 steps for 0.25 increments
                     modifier = Modifier.padding(horizontal = 16.dp),
                     colors = SliderDefaults.colors(
                         thumbColor = Color(0xFF4CAF50),
