@@ -734,8 +734,8 @@ impl Emu {
 
     // ========== State Persistence ==========
 
-    /// State format version
-    const STATE_VERSION: u32 = 1;
+    /// State format version (v2 adds flash persistence)
+    const STATE_VERSION: u32 = 2;
     /// Magic bytes for state file identification
     const STATE_MAGIC: [u8; 4] = *b"CE84";
     /// Header size: magic(4) + version(4) + rom_hash(8) + data_len(4) = 20
@@ -759,7 +759,7 @@ impl Emu {
     /// Get size required for save state buffer
     pub fn save_state_size(&self) -> usize {
         use crate::cpu::Cpu;
-        use crate::memory::addr::RAM_SIZE;
+        use crate::memory::addr::{FLASH_SIZE, RAM_SIZE};
         use crate::peripherals::Peripherals;
         use crate::scheduler::Scheduler;
 
@@ -769,16 +769,14 @@ impl Emu {
             + Peripherals::SNAPSHOT_SIZE
             + Self::STATE_META_SIZE
             + RAM_SIZE
+            + FLASH_SIZE
     }
 
     /// Save emulator state to buffer
     /// Returns number of bytes written on success
-    // TODO: Save flash memory to support user programs and modified OS (Milestone 9)
-    // Currently only RAM is saved; flash is restored from the original ROM file.
-    // CEmu saves flash (~4MB) which is why its state files are much larger (~4.5MB vs ~416KB).
     pub fn save_state(&self, buffer: &mut [u8]) -> Result<usize, i32> {
         use crate::cpu::Cpu;
-        use crate::memory::addr::RAM_SIZE;
+        use crate::memory::addr::{FLASH_SIZE, RAM_SIZE};
         use crate::peripherals::Peripherals;
         use crate::scheduler::Scheduler;
 
@@ -826,6 +824,11 @@ impl Emu {
         buffer[pos..pos+RAM_SIZE].copy_from_slice(ram_data);
         pos += RAM_SIZE;
 
+        // Write Flash
+        let flash_data = self.bus.flash.data();
+        buffer[pos..pos+FLASH_SIZE].copy_from_slice(flash_data);
+        pos += FLASH_SIZE;
+
         Self::log_event(&format!("STATE_SAVED: {} bytes", pos));
         Ok(pos)
     }
@@ -833,7 +836,7 @@ impl Emu {
     /// Load emulator state from buffer
     pub fn load_state(&mut self, buffer: &[u8]) -> Result<(), i32> {
         use crate::cpu::Cpu;
-        use crate::memory::addr::RAM_SIZE;
+        use crate::memory::addr::{FLASH_SIZE, RAM_SIZE};
         use crate::peripherals::Peripherals;
         use crate::scheduler::Scheduler;
 
@@ -870,7 +873,7 @@ impl Emu {
         pos += 4;
 
         let expected_data = Cpu::SNAPSHOT_SIZE + Scheduler::SNAPSHOT_SIZE
-            + Peripherals::SNAPSHOT_SIZE + Self::STATE_META_SIZE + RAM_SIZE;
+            + Peripherals::SNAPSHOT_SIZE + Self::STATE_META_SIZE + RAM_SIZE + FLASH_SIZE;
         if data_len < expected_data || buffer.len() < pos + data_len {
             return Err(-105); // Data corruption
         }
@@ -895,6 +898,10 @@ impl Emu {
 
         // Load RAM
         self.bus.ram.load_data(&buffer[pos..pos+RAM_SIZE]);
+        pos += RAM_SIZE;
+
+        // Load Flash
+        self.bus.flash.load_data(&buffer[pos..pos+FLASH_SIZE]);
 
         // Reset transient state
         self.rom_loaded = true;
