@@ -118,13 +118,14 @@ class EmulatorState: ObservableObject {
             guard let self = self else { return }
 
             while !Task.isCancelled {
-                guard await self.isRunning else {
+                let running = await MainActor.run { self.isRunning }
+                guard running else {
                     try? await Task.sleep(nanoseconds: 16_000_000) // 16ms
                     continue
                 }
 
                 let frameStart = Date()
-                let cycles = await self.cyclesPerTick
+                let cycles = await MainActor.run { self.cyclesPerTick }
                 let executed = self.emulator.runCycles(cycles)
 
                 await MainActor.run {

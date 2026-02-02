@@ -18,6 +18,7 @@
 		A10000009 /* KeyButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000018 /* KeyButton.swift */; };
 		A1000000A /* DebugOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000019 /* DebugOverlayView.swift */; };
 		A1000000B /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000001A /* Assets.xcassets */; };
+		A1000000C /* EmulatorPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000001D /* EmulatorPreferences.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -35,6 +36,8 @@
 		A1000001A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A1000001B /* Calc-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Calc-Bridging-Header.h"; sourceTree = "<group>"; };
 		A1000001C /* emu.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = emu.h; sourceTree = "<group>"; };
+		A1000001D /* EmulatorPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmulatorPreferences.swift; sourceTree = "<group>"; };
+		A1000001E /* emu_backend.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = emu_backend.h; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -74,6 +77,7 @@
 			isa = PBXGroup;
 			children = (
 				A1000001C /* emu.h */,
+				A1000001E /* emu_backend.h */,
 			);
 			path = include;
 			sourceTree = "<group>";
@@ -112,6 +116,7 @@
 			isa = PBXGroup;
 			children = (
 				A10000013 /* KeyDef.swift */,
+				A1000001D /* EmulatorPreferences.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -203,6 +208,7 @@
 				A10000008 /* DPadView.swift in Sources */,
 				A10000009 /* KeyButton.swift in Sources */,
 				A1000000A /* DebugOverlayView.swift in Sources */,
+				A1000000C /* EmulatorPreferences.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
