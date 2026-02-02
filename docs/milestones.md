@@ -254,7 +254,7 @@ cargo run --release --example debug -- compare <cemu_trace>  # Compare traces
 - [x] Save-state buffer APIs (Rust: ~4.5MB with flash, CEmu: ~4.5MB)
 - [x] iOS save/load state (Rust backend)
 - [x] iOS save/load state (CEmu backend)
-- [ ] Android save/load state
+- [x] Android save/load state
 - [ ] State persistence verified on both platforms
 
 ## Milestone 10: Web App (WASM)
@@ -282,4 +282,3 @@ cargo run --release --example debug -- compare <cemu_trace>  # Compare traces
 - [ ] Speed toggle (normal/turbo)
 - [ ] Debug overlay (optional)
 - [ ] Accurate keypad layout
-- [ ] Android state persistence

@@ -66,9 +66,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private val emulator = EmulatorBridge()
+    private lateinit var stateManager: StateManager
+    private var currentRomHash: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Initialize state manager
+        stateManager = StateManager.getInstance(applicationContext)
 
         // Initialize EmulatorBridge with application context
         EmulatorBridge.initialize(applicationContext)
@@ -89,8 +94,26 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    EmulatorScreen(emulator)
+                    EmulatorScreen(
+                        emulator = emulator,
+                        stateManager = stateManager,
+                        onRomLoaded = { hash -> currentRomHash = hash },
+                        getCurrentRomHash = { currentRomHash }
+                    )
                 }
+            }
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // Save state when going to background
+        currentRomHash?.let { hash ->
+            Log.i(TAG, "Saving state on pause for ROM: $hash")
+            if (stateManager.saveState(emulator, hash)) {
+                Log.i(TAG, "State saved successfully")
+            } else {
+                Log.w(TAG, "Failed to save state")
             }
         }
     }
@@ -102,7 +125,12 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun EmulatorScreen(emulator: EmulatorBridge) {
+fun EmulatorScreen(
+    emulator: EmulatorBridge,
+    stateManager: StateManager,
+    onRomLoaded: (String) -> Unit,
+    getCurrentRomHash: () -> String?
+) {
     val context = LocalContext.current
 
     // Emulator state
@@ -112,6 +140,7 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
     var romSize by remember { mutableIntStateOf(0) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var currentRomBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var currentRomHash by remember { mutableStateOf<String?>(null) }
 
     // Backend state
     val availableBackends = remember { EmulatorBridge.getAvailableBackends() }
@@ -149,6 +178,15 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
                     val romBytes = stream.readBytes()
                     romSize = romBytes.size
                     currentRomBytes = romBytes
+
+                    // Compute ROM hash for state persistence
+                    val hash = stateManager.romHash(romBytes)
+                    currentRomHash = hash
+                    onRomLoaded(hash)
+
+                    // Save ROM copy to our storage
+                    stateManager.saveRom(romBytes, hash)
+
                     val result = emulator.loadRom(romBytes)
                     if (result == 0) {
                         romLoaded = true
@@ -157,7 +195,13 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
                         totalCyclesExecuted = 0L
                         frameCounter = 0
                         logLines.clear()
-                        isRunning = true  // Auto-start to show boot process
+
+                        // Try to restore saved state
+                        if (stateManager.loadState(emulator, hash)) {
+                            Log.i("EmulatorScreen", "Restored saved state for ROM: $hash")
+                        }
+
+                        isRunning = true  // Auto-start
                         Log.i("EmulatorScreen", "ROM loaded: ${romBytes.size} bytes")
                     } else {
                         loadError = "Failed to load ROM (error: $result)"
