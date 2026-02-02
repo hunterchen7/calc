@@ -27,8 +27,8 @@ The mobile apps (Android & iOS) are designed to work with **two interchangeable 
 │              iOS (Swift/SwiftUI)                        │
 ├─────────────────────────────────────────────────────────┤
 │                   C API (emu.h)                         │
-│    emu_create, emu_load_rom, emu_run_cycles,           │
-│    emu_framebuffer, emu_set_key, ...                   │
+│    emu_create, emu_load_rom, emu_run_cycles,            │
+│    emu_framebuffer, emu_set_key, ...                    │
 ├───────────────────────┬─────────────────────────────────┤
 │   Rust Core           │   CEmu Adapter                  │
 │   (libemu_core.a)     │   (libcemu_adapter.a)           │
