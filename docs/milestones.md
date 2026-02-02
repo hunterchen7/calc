@@ -250,8 +250,9 @@ cargo run --release --example debug -- compare <cemu_trace>  # Compare traces
 **Deliverables:**
 
 - [ ] Flash write/erase behavior
-- [ ] Save-state buffer APIs
+- [x] Save-state buffer APIs (Rust: ~416KB, CEmu: ~4.5MB)
 - [x] iOS save/load state (Rust backend)
+- [x] iOS save/load state (CEmu backend)
 - [ ] Android save/load state
 - [ ] State persistence verified on both platforms
 
