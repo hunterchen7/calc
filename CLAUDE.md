@@ -179,21 +179,28 @@ Key differences from standard Z80 that affect emulation:
 
 ## Key Lessons Learned
 
-### Scheduler Parity Not Required
+### Exact Scheduler Parity Required
 
-Exact scheduler timing parity with CEmu is **not required** for correct emulation. The scheduler is an implementation detail - what matters is:
-- Peripheral reads/writes return correct values
-- Interrupts fire when expected
-- Polling loops eventually complete
+Exact cycle timing parity with CEmu is **required**. Every instruction should execute with identical cycle counts. Key areas to verify:
 
-The ROM handles timing variations gracefully through polling loops. Different iteration counts don't affect correctness.
+- **Register parity**: AF, BC, DE, HL, IX, IY, SP must match at every PC
+- **Cycle parity**: Total cycles must match CEmu at each instruction
+- **Memory timing**: Flash wait states, RAM cycles, port write delays must match
+
+Known cycle timing differences to fix:
+- **ED39 (OUT0)**: CPU speed port writes show ~28K cycle difference due to clock conversion
+- **Branch instructions**: DJNZ costs 23-29 cycles (should be 37-43 like CEmu)
+- **JR NZ/JR Z**: ~188/107 cycle difference per call
+
+Use `cargo trace` and compare against CEmu traces to verify parity.
 
 ### Trace Comparison Strategy
 
-1. **PC parity ≠ full parity** - Matching PC doesn't mean registers match
+1. **Check cycle deltas** - Compare per-instruction cycle costs, not just totals
 2. **Check AF (flags)** - Flag differences often reveal CPU bugs
-3. **Run longer traces** - Many bugs only appear after 100K+ steps
-4. **Use sparse traces** - Log every Nth step for long runs to save space
+3. **Account for suffix opcodes** - CEmu logs 40/49/52/5B as separate steps, we combine them
+4. **Run longer traces** - Many bugs only appear after 100K+ steps
+5. **Analyze by opcode** - Group cycle drift by instruction type to find systematic issues
 
 ### Critical Instructions for Boot
 

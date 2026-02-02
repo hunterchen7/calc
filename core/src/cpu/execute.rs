@@ -172,6 +172,9 @@ impl Cpu {
             4 => {
                 // INC r
                 let val = self.get_reg8(y, bus);
+                if y == 6 {
+                    bus.add_cycles(1); // CEmu: cpu.cycles += context.y == 6
+                }
                 let result = self.alu_inc(val);
                 self.set_reg8(y, result, bus);
                 if y == 6 {
@@ -183,6 +186,9 @@ impl Cpu {
             5 => {
                 // DEC r
                 let val = self.get_reg8(y, bus);
+                if y == 6 {
+                    bus.add_cycles(1); // CEmu: cpu.cycles += context.y == 6
+                }
                 let result = self.alu_dec(val);
                 self.set_reg8(y, result, bus);
                 if y == 6 {
@@ -405,6 +411,7 @@ impl Cpu {
                     0 => {
                         // JP nn
                         // Fetch uses IL mode (set by suffix), then ADL becomes IL
+                        bus.add_cycles(1); // CEmu: cpu.cycles++ for JP nn
                         self.pc = self.fetch_addr(bus);
                         self.adl = self.il;
                         10
@@ -473,7 +480,10 @@ impl Cpu {
                 // Fetch uses IL mode, push uses L mode, then ADL becomes IL if call is taken
                 let nn = self.fetch_addr(bus);
                 if self.check_cc(y) {
-                    bus.add_cycles(1); // CEmu: cpu.cycles++ for call taken
+                    // CEmu: cpu.cycles += !cpu.SUFFIX && !cpu.ADL (only in Z80 mode)
+                    if !self.suffix && !self.adl {
+                        bus.add_cycles(1);
+                    }
                     self.push_addr(bus, self.pc);
                     self.pc = nn;
                     self.adl = self.il;
@@ -590,12 +600,15 @@ impl Cpu {
         match x {
             0 => {
                 // Rotate/shift operations
+                if z == 6 {
+                    bus.add_cycles(1); // CEmu: cpu.cycles += z == 6 in cpu_execute_rot
+                }
                 let result = self.execute_rot(y, val);
                 self.set_reg8(z, result, bus);
                 cycles
             }
             1 => {
-                // BIT y, r[z] - test bit
+                // BIT y, r[z] - test bit (no extra cycle for z==6)
                 let mask = 1 << y;
                 let result = val & mask;
 
@@ -617,12 +630,18 @@ impl Cpu {
             }
             2 => {
                 // RES y, r[z] - reset bit
+                if z == 6 {
+                    bus.add_cycles(1); // CEmu: cpu.cycles += context.z == 6
+                }
                 let result = val & !(1 << y);
                 self.set_reg8(z, result, bus);
                 cycles
             }
             3 => {
                 // SET y, r[z] - set bit
+                if z == 6 {
+                    bus.add_cycles(1); // CEmu: cpu.cycles += context.z == 6
+                }
                 let result = val | (1 << y);
                 self.set_reg8(z, result, bus);
                 cycles
@@ -1144,6 +1163,7 @@ impl Cpu {
                     }
                     6 => {
                         // SLP - sleep (same as HALT on TI-84 CE)
+                        bus.add_cycles(1); // CEmu: cpu.cycles++ for SLP
                         self.halted = true;
                         return 4;
                     }
@@ -1190,6 +1210,7 @@ impl Cpu {
                         // RRD
                         let addr = self.mask_addr(self.hl);
                         let mem = bus.read_byte(addr);
+                        bus.add_cycles(1); // CEmu: cpu.cycles++ for RRD
                         let new_mem = (self.a << 4) | (mem >> 4);
                         self.a = (self.a & 0xF0) | (mem & 0x0F);
                         bus.write_byte(addr, new_mem);
@@ -1204,6 +1225,7 @@ impl Cpu {
                         // RLD
                         let addr = self.mask_addr(self.hl);
                         let mem = bus.read_byte(addr);
+                        bus.add_cycles(1); // CEmu: cpu.cycles++ for RLD
                         let new_mem = (mem << 4) | (self.a & 0x0F);
                         self.a = (self.a & 0xF0) | (mem >> 4);
                         bus.write_byte(addr, new_mem);
@@ -1239,6 +1261,7 @@ impl Cpu {
                 self.set_flag_n(false);
                 self.set_flag_pv(self.bc != 0);
                 // F3/F5 preserved (CEmu behavior)
+                bus.add_cycles(1); // CEmu: cpu.cycles += internalCycles (1 for LDI)
                 16
             }
             // LDD - Load and decrement
@@ -1255,6 +1278,7 @@ impl Cpu {
                 self.set_flag_h(false);
                 self.set_flag_n(false);
                 self.set_flag_pv(self.bc != 0);
+                bus.add_cycles(1); // CEmu: cpu.cycles += internalCycles (1 for LDD)
                 // F3/F5 preserved (CEmu behavior)
                 16
             }
@@ -1336,6 +1360,7 @@ impl Cpu {
                 // F3/F5 handling for CPI is complex
                 let n = result.wrapping_sub(if self.flag_h() { 1 } else { 0 });
                 self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
+                bus.add_cycles(1); // CEmu: cpu.cycles += internalCycles (1 for CPI)
                 16
             }
             // CPD - Compare and decrement
@@ -1353,6 +1378,7 @@ impl Cpu {
                 self.set_flag_pv(self.bc != 0);
                 let n = result.wrapping_sub(if self.flag_h() { 1 } else { 0 });
                 self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
+                bus.add_cycles(1); // CEmu: cpu.cycles += internalCycles (1 for CPD)
                 16
             }
             // CPIR - Compare, increment, repeat
@@ -1553,6 +1579,7 @@ impl Cpu {
             1 => {
                 if y == 6 && z == 6 {
                     // HALT - not affected by prefix
+                    bus.add_cycles(1); // CEmu: cpu.cycles++ for HALT
                     self.halted = true;
                     4
                 } else if y == 6 {
@@ -1879,6 +1906,7 @@ impl Cpu {
                     let index_reg = if use_ix { self.ix } else { self.iy };
                     let addr = self.mask_addr((index_reg as i32 + d as i32) as u32);
                     let val = bus.read_byte(addr);
+                    bus.add_cycles(1); // CEmu: cpu.cycles += context.y == 6
                     let result = self.alu_inc(val);
                     bus.write_byte(addr, result);
                     23
@@ -1897,6 +1925,7 @@ impl Cpu {
                     let index_reg = if use_ix { self.ix } else { self.iy };
                     let addr = self.mask_addr((index_reg as i32 + d as i32) as u32);
                     let val = bus.read_byte(addr);
+                    bus.add_cycles(1); // CEmu: cpu.cycles += context.y == 6
                     let result = self.alu_dec(val);
                     bus.write_byte(addr, result);
                     23
@@ -2231,6 +2260,7 @@ impl Cpu {
             }
             7 => {
                 // RST - not affected
+                bus.add_cycles(1); // CEmu: cpu.cycles++ in cpu_rst()
                 self.push_addr(bus, self.pc);
                 self.adl = self.l;
                 self.pc = (y as u32) * 8;
@@ -2258,6 +2288,8 @@ impl Cpu {
         match x {
             0 => {
                 // Rotate/shift on (IX+d)/(IY+d), optionally copy to register
+                // CEmu: cpu.cycles += z == 6 in cpu_execute_rot (z is always 6 for indexed)
+                bus.add_cycles(1);
                 let result = self.execute_rot(y, val);
                 bus.write_byte(addr, result);
                 // If z != 6, also copy to register (undocumented)
@@ -2267,7 +2299,7 @@ impl Cpu {
                 23
             }
             1 => {
-                // BIT y,(IX+d)/(IY+d)
+                // BIT y,(IX+d)/(IY+d) - no extra cycle
                 let mask = 1 << y;
                 let result = val & mask;
 
@@ -2284,6 +2316,8 @@ impl Cpu {
             }
             2 => {
                 // RES y,(IX+d)/(IY+d), optionally copy to register
+                // CEmu: cpu.cycles += context.z == 6 (z is always 6 for indexed)
+                bus.add_cycles(1);
                 let result = val & !(1 << y);
                 bus.write_byte(addr, result);
                 if z != 6 {
@@ -2293,6 +2327,8 @@ impl Cpu {
             }
             3 => {
                 // SET y,(IX+d)/(IY+d), optionally copy to register
+                // CEmu: cpu.cycles += context.z == 6 (z is always 6 for indexed)
+                bus.add_cycles(1);
                 let result = val | (1 << y);
                 bus.write_byte(addr, result);
                 if z != 6 {
