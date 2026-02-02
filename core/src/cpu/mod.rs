@@ -340,7 +340,9 @@ impl Cpu {
         if self.prefix != 0 {
             let use_ix = self.prefix == 2; // 2=DD (IX), 3=FD (IY)
             self.prefix = 0;
-            return self.execute_index(bus, use_ix);
+            let internal_cycles = self.execute_index(bus, use_ix);
+            bus.add_cycles(internal_cycles as u64);
+            return (bus.cycles() - start_cycles) as u32;
         }
 
         // Opcode fetch loop - handles suffix opcodes that modify the following instruction
@@ -379,28 +381,33 @@ impl Cpu {
                 continue;
             }
 
-            // Execute instruction - the return values are legacy and ignored
-            // since we now track cycles via bus.cycles()
-            match x {
-                0 => { self.execute_x0(bus, y, z, p, q); }
+            // Execute instruction and apply internal CPU cycles to bus cycle counter
+            // CEmu pattern: cpu.cycles += internalCycles during instruction execution
+            // Memory access cycles are already tracked by bus read/write operations
+            let internal_cycles = match x {
+                0 => self.execute_x0(bus, y, z, p, q),
                 1 => {
                     if y == 6 && z == 6 {
-                        // HALT
+                        // HALT - CEmu adds 1 cycle before calling cpu_halt()
                         self.halted = true;
+                        1
                     } else {
-                        // LD r,r'
+                        // LD r,r' - 1 cycle for register-to-register
                         let val = self.get_reg8(z, bus);
                         self.set_reg8(y, val, bus);
+                        1
                     }
                 }
                 2 => {
-                    // ALU A,r
+                    // ALU A,r - 1 cycle for register operand
                     let val = self.get_reg8(z, bus);
                     self.execute_alu(y, val);
+                    1
                 }
-                3 => { self.execute_x3(bus, y, z, p, q); }
-                _ => {}
-            }
+                3 => self.execute_x3(bus, y, z, p, q),
+                _ => 0,
+            };
+            bus.add_cycles(internal_cycles as u64);
 
             break;
         }
