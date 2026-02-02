@@ -70,6 +70,9 @@ pub struct ControlPorts {
     power: u8,
     /// CPU speed setting
     cpu_speed: u8,
+    /// Flag set when port 0x01 (CPU_SPEED) is written
+    /// CEmu resets cycle counter on ANY write to this port, not just when value changes
+    cpu_speed_written: bool,
     /// Device type flags
     device_type: u8,
     /// Control flags
@@ -119,6 +122,7 @@ impl ControlPorts {
         Self {
             power: 0x00,
             cpu_speed: speed::MHZ_6,  // CEmu starts at 6 MHz, ROM sets speed later
+            cpu_speed_written: false,
             device_type: 0x00,        // Standard device
             control_flags: 0x00,
             unlock_status: 0x00,
@@ -233,7 +237,12 @@ impl ControlPorts {
                 // Battery FSM transitions would go here if implemented
                 // For now we skip the FSM to ensure boot completes
             }
-            regs::CPU_SPEED => self.cpu_speed = value & 0x03,
+            regs::CPU_SPEED => {
+                self.cpu_speed = value & 0x03;
+                // CEmu calls set_cpu_clock() on EVERY write to port 0x01,
+                // which resets the cycle counter regardless of value change
+                self.cpu_speed_written = true;
+            }
             regs::BATTERY_STATUS => {} // Read-only
             regs::DEVICE_TYPE => {}    // Read-only
             regs::CONTROL_FLAGS => {
@@ -323,6 +332,18 @@ impl ControlPorts {
     /// Get current CPU speed setting
     pub fn cpu_speed(&self) -> u8 {
         self.cpu_speed
+    }
+
+    /// Check if CPU_SPEED port was written since last check, and reset the flag.
+    /// Returns true if port was written (used to trigger cycle counter reset like CEmu).
+    /// CEmu calls set_cpu_clock() on ANY write to port 0x01, which resets cycles.
+    pub fn cpu_speed_changed(&mut self) -> bool {
+        if self.cpu_speed_written {
+            self.cpu_speed_written = false;
+            true
+        } else {
+            false
+        }
     }
 
     /// Check if LCD is enabled via control port 0x0D

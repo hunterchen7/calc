@@ -246,7 +246,21 @@ impl Cpu {
     /// CPU processing cycles. This matches CEmu's cycle counting behavior.
     pub fn step(&mut self, bus: &mut Bus) -> u32 {
         // Track cycles at start - we return the delta at the end
-        let start_cycles = bus.cycles();
+        // Use total_cycles() to include both CPU internal cycles and memory timing
+        let start_cycles = bus.total_cycles();
+
+        /// Helper to compute cycle delta, handling the case where the cycle counter
+        /// was reset mid-instruction (e.g., when CPU speed changes via port 0x01 write).
+        /// In that case, end_cycles < start_cycles, so we return end_cycles (cycles since reset).
+        #[inline(always)]
+        fn cycle_delta(start: u64, end: u64) -> u32 {
+            if end >= start {
+                (end - start) as u32
+            } else {
+                // Cycle counter was reset - return cycles accumulated since reset
+                end as u32
+            }
+        }
 
         // Process EI delay - interrupts enable AFTER the instruction following EI
         // This happens BEFORE we check for interrupts, so that:
@@ -265,14 +279,14 @@ impl Cpu {
         if self.nmi_pending {
             self.nmi_pending = false;
             self.handle_nmi(bus);
-            return (bus.cycles() - start_cycles) as u32;
+            return cycle_delta(start_cycles, bus.total_cycles());
         }
 
         // Check for maskable interrupt
         if self.irq_pending && self.iff1 {
             self.irq_pending = false;
             self.handle_irq(bus);
-            return (bus.cycles() - start_cycles) as u32;
+            return cycle_delta(start_cycles, bus.total_cycles());
         }
 
         // Check for ON key wake - can wake CPU even with interrupts disabled
@@ -299,7 +313,7 @@ impl Cpu {
             if self.halted {
                 self.halted = false;
                 bus.add_cycles(4); // Wake from halt cycle cost
-                return (bus.cycles() - start_cycles) as u32;
+                return cycle_delta(start_cycles, bus.total_cycles());
             }
             // If not halted, CPU is running in powered-off loop - interrupts now enabled,
             // so ON_KEY interrupt will fire on next iteration
@@ -313,7 +327,7 @@ impl Cpu {
                 self.any_key_wake = false;
                 self.halted = false;
                 bus.add_cycles(4); // Wake from halt cycle cost
-                return (bus.cycles() - start_cycles) as u32;
+                return cycle_delta(start_cycles, bus.total_cycles());
             }
             // Clear the flag even if not halted - signal has been processed
             self.any_key_wake = false;
@@ -323,7 +337,7 @@ impl Cpu {
             // CPU is halted, just consume cycles
             // Interrupts can wake it (handled above on next call)
             bus.add_cycles(4); // Halted NOP cycle cost
-            return (bus.cycles() - start_cycles) as u32;
+            return cycle_delta(start_cycles, bus.total_cycles());
         }
 
         // eZ80 per-instruction mode handling:
@@ -414,7 +428,7 @@ impl Cpu {
             break;
         }
 
-        (bus.cycles() - start_cycles) as u32
+        cycle_delta(start_cycles, bus.total_cycles())
     }
 
     /// Handle maskable interrupt (IRQ)

@@ -232,31 +232,46 @@ fn cmd_trace(max_steps: u64) {
     println!("=== Trace Generation ({} steps) ===", max_steps);
     println!("Output: {}", output_path);
 
-    // Log initial state
-    log_trace_line(&mut writer, &mut emu, 0, 0);
+    // Log initial state - use bus_cycles() for raw counter (resets on CPU speed change like CEmu)
+    let initial_cycles = emu.bus_cycles();
+    log_trace_line(&mut writer, &mut emu, 0, initial_cycles);
 
     let mut step = 0u64;
-    let mut total_cycles = 0u64;
+    let mut cycles = initial_cycles;
 
     while step < max_steps {
-        let cycles_used = emu.run_cycles(1) as u64;
-        step += 1;
-        total_cycles += cycles_used;
+        // Debug: capture state before execution for first few steps
+        let pc_before = emu.pc();
+        let cycles_before = emu.bus_cycles();
 
-        log_trace_line(&mut writer, &mut emu, step, total_cycles);
+        emu.run_cycles(1);
+        step += 1;
+
+        // Use raw bus cycle counter which resets on CPU speed change (matches CEmu)
+        cycles = emu.bus_cycles();
+
+        // Debug: print detailed info for early steps
+        if step <= 10 {
+            let pc_after = emu.pc();
+            eprintln!("Step {}: PC {:06X} -> {:06X}, cycles {} -> {} (delta {})",
+                     step, pc_before, pc_after, cycles_before, cycles,
+                     cycles as i64 - cycles_before as i64);
+        }
+
+        log_trace_line(&mut writer, &mut emu, step, cycles);
 
         if step % 100_000 == 0 {
             eprintln!("Progress: {} steps ({:.1}%)", step, 100.0 * step as f64 / max_steps as f64);
         }
 
         if emu.is_halted() {
-            eprintln!("HALT at step {} / cycle {}", step, total_cycles);
+            eprintln!("HALT at step {} / cycle {}", step, cycles);
             break;
         }
     }
 
     writer.flush().expect("Failed to flush output");
-    println!("Trace complete: {} steps / {} cycles", step, total_cycles);
+    println!("Trace complete: {} steps / {} cycles", step, cycles);
     println!("Saved to: {}", output_path);
 }
 

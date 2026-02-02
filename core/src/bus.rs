@@ -413,8 +413,12 @@ pub struct Bus {
     spi: SpiController,
     /// RNG for unmapped region reads
     rng: BusRng,
-    /// Cycle counter for timing
+    /// Internal CPU cycle counter (matches CEmu's cpu.cycles)
+    /// This only tracks CPU internal timing, not memory access delays
     cycles: u64,
+    /// Memory access timing cycles (matches CEmu's flash/DMA delay cycles)
+    /// This tracks memory wait states separately from CPU internal timing
+    mem_cycles: u64,
     /// Circular buffer of recently fetched instruction bytes
     fetch_buffer: [u8; FETCH_BUFFER_SIZE],
     /// Current index in fetch buffer (points to most recent byte + 1)
@@ -430,11 +434,16 @@ pub struct Bus {
 
 impl Bus {
     /// Wait states for different memory regions
-    /// These affect CPU timing for accurate emulation
-    pub const FLASH_READ_CYCLES: u64 = 10;  // ~4 wait states + fetch
-    pub const RAM_READ_CYCLES: u64 = 4;     // 3 wait states + 1
-    pub const RAM_WRITE_CYCLES: u64 = 2;    // 1 wait state + 1
-    pub const UNMAPPED_CYCLES: u64 = 2;
+    /// These affect CPU timing for accurate emulation (must match CEmu exactly)
+    pub const FLASH_READ_CYCLES: u64 = 10;  // flash.waitStates default
+    pub const RAM_READ_CYCLES: u64 = 4;     // sched_process_pending_dma(4)
+    pub const RAM_WRITE_CYCLES: u64 = 2;    // sched_process_pending_dma(2)
+
+    /// Unmapped region timing depends on flash mode
+    /// Serial flash: 2 cycles
+    /// Parallel flash: 258 cycles for 0x400000-0xCFFFFF range
+    pub const UNMAPPED_SERIAL_CYCLES: u64 = 2;
+    pub const UNMAPPED_PARALLEL_CYCLES: u64 = 258;
 
     /// Per-port-range read cycles (indexed by port range 0x0-0xF)
     /// From CEmu port.c: {2,2,2,4,3,3,3,3,3,3,3,3,3,3,3,3}
@@ -447,12 +456,10 @@ impl Bus {
     /// From CEmu port.c: {2,2,2,4,2,3,3,3,3,3,3,3,3,3,3,3}
     const PORT_WRITE_CYCLES: [u64; 16] = [2, 2, 2, 4, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3];
 
-    /// Memory-mapped I/O read cycles (used for read_byte at 0xE00000+)
-    /// This is the default timing; IN/OUT use per-port timing above
-    const MMIO_READ_CYCLES: u64 = 3;
-
-    /// Memory-mapped I/O write cycles (used for write_byte at 0xE00000+)
-    const MMIO_WRITE_CYCLES: u64 = 3;
+    /// Unmapped MMIO timing (addresses that don't map to valid ports)
+    /// CEmu: 0xFB0000-0xFEFFFF = 3 cycles, other = 2 cycles
+    const UNMAPPED_MMIO_PROTECTED_CYCLES: u64 = 3;  // 0xFB0000-0xFEFFFF
+    const UNMAPPED_MMIO_OTHER_CYCLES: u64 = 2;       // other unmapped MMIO
 
     /// Create a new bus with fresh memory
     /// Defaults to parallel flash mode (older TI-84 CE models, more compatible)
@@ -464,6 +471,7 @@ impl Bus {
             spi: SpiController::new(),
             rng: BusRng::new(),
             cycles: 0,
+            mem_cycles: 0,
             fetch_buffer: [0; FETCH_BUFFER_SIZE],
             fetch_index: 0,
             write_tracer: WriteTracer::new(),
@@ -529,21 +537,29 @@ impl Bus {
                 if self.serial_flash {
                     self.cycles += self.flash_cache.touch(addr);
                 } else {
-                    self.cycles += Self::FLASH_READ_CYCLES;
+                    self.mem_cycles += Self::FLASH_READ_CYCLES;
                 }
                 self.flash.read(addr)
             }
             MemoryRegion::Ram | MemoryRegion::Vram => {
-                self.cycles += Self::RAM_READ_CYCLES;
+                self.mem_cycles += Self::RAM_READ_CYCLES;
                 self.ram.read(addr - addr::RAM_START)
             }
             MemoryRegion::Ports => {
-                self.cycles += Self::MMIO_READ_CYCLES;
+                // Use port-specific timing like CEmu's port_read_byte()
+                let port_offset = addr - addr::PORT_START;
+                let port_range = (port_offset >> 12) & 0xF;
+                self.mem_cycles += Self::PORT_READ_CYCLES[port_range as usize];
                 let keys = *self.ports.key_state();
-                self.ports.read(addr - addr::PORT_START, &keys, self.cycles)
+                self.ports.read(port_offset, &keys, self.cycles)
             }
             MemoryRegion::Unmapped => {
-                self.cycles += Self::UNMAPPED_CYCLES;
+                // CEmu: 258 cycles for parallel mode, 2 for serial mode
+                if self.serial_flash {
+                    self.mem_cycles += Self::UNMAPPED_SERIAL_CYCLES;
+                } else {
+                    self.mem_cycles += Self::UNMAPPED_PARALLEL_CYCLES;
+                }
                 self.rng.next()
             }
         }
@@ -568,21 +584,29 @@ impl Bus {
                 if self.serial_flash {
                     self.cycles += self.flash_cache.touch(addr);
                 } else {
-                    self.cycles += Self::FLASH_READ_CYCLES;
+                    self.mem_cycles += Self::FLASH_READ_CYCLES;
                 }
                 self.flash.read(addr)
             }
             MemoryRegion::Ram | MemoryRegion::Vram => {
-                self.cycles += Self::RAM_READ_CYCLES;
+                self.mem_cycles += Self::RAM_READ_CYCLES;
                 self.ram.read(addr - addr::RAM_START)
             }
             MemoryRegion::Ports => {
-                self.cycles += Self::MMIO_READ_CYCLES;
+                // Use port-specific timing like CEmu's port_read_byte()
+                let port_offset = addr - addr::PORT_START;
+                let port_range = (port_offset >> 12) & 0xF;
+                self.mem_cycles += Self::PORT_READ_CYCLES[port_range as usize];
                 let keys = *self.ports.key_state();
-                self.ports.read(addr - addr::PORT_START, &keys, self.cycles)
+                self.ports.read(port_offset, &keys, self.cycles)
             }
             MemoryRegion::Unmapped => {
-                self.cycles += Self::UNMAPPED_CYCLES;
+                // CEmu: 258 cycles for parallel mode, 2 for serial mode
+                if self.serial_flash {
+                    self.mem_cycles += Self::UNMAPPED_SERIAL_CYCLES;
+                } else {
+                    self.mem_cycles += Self::UNMAPPED_PARALLEL_CYCLES;
+                }
                 self.rng.next()
             }
         };
@@ -652,20 +676,20 @@ impl Bus {
 
         match Self::decode_address(addr) {
             MemoryRegion::Flash => {
-                // In serial flash mode, writes touch the cache but don't modify flash
-                // In parallel flash mode, writes are ignored unless unlocked
+                // CEmu mem_write_flash: serial uses cache touch, parallel uses waitStates
                 if self.serial_flash {
                     self.cycles += self.flash_cache.touch(addr);
                     // Serial flash writes are ignored (no actual write occurs)
                 } else {
-                    self.cycles += Self::UNMAPPED_CYCLES;
+                    // CEmu: cpu.cycles += flash.waitStates for parallel flash writes
+                    self.mem_cycles += Self::FLASH_READ_CYCLES;  // Same as read for parallel
                     if self.ports.control.flash_unlocked() {
                         self.flash.write_cpu(addr, value);
                     }
                 }
             }
             MemoryRegion::Ram | MemoryRegion::Vram => {
-                self.cycles += Self::RAM_WRITE_CYCLES;
+                self.mem_cycles += Self::RAM_WRITE_CYCLES;
                 // Record write for tracing (before actually writing)
                 if self.write_tracer.is_enabled() {
                     self.write_tracer.record(addr, value, self.cycles);
@@ -673,12 +697,25 @@ impl Bus {
                 self.ram.write(addr - addr::RAM_START, value);
             }
             MemoryRegion::Ports => {
-                self.cycles += Self::MMIO_WRITE_CYCLES;
-                self.ports.write(addr - addr::PORT_START, value, self.cycles);
+                // Use port-specific timing like CEmu's port_write_byte()
+                let port_offset = addr - addr::PORT_START;
+                let port_range = (port_offset >> 12) & 0xF;
+                self.ports.write(port_offset, value, self.cycles);
+                // CEmu: sched_set_clock() resets cycle counter on CPU speed change
+                // Reset BEFORE adding port write cycles so they're counted after reset
+                if self.ports.control.cpu_speed_changed() {
+                    self.reset_cycles();
+                }
+                self.mem_cycles += Self::PORT_WRITE_CYCLES[port_range as usize];
             }
             MemoryRegion::Unmapped => {
                 // Writes to unmapped regions are ignored
-                self.cycles += Self::UNMAPPED_CYCLES;
+                // CEmu: 258 cycles for parallel mode, 2 for serial mode
+                if self.serial_flash {
+                    self.mem_cycles += Self::UNMAPPED_SERIAL_CYCLES;
+                } else {
+                    self.mem_cycles += Self::UNMAPPED_PARALLEL_CYCLES;
+                }
             }
         }
     }
@@ -787,19 +824,35 @@ impl Bus {
         self.flash.load_rom(data)
     }
 
-    /// Get current cycle count
+    /// Get current CPU cycle count (internal CPU timing only, matches CEmu's cpu.cycles)
     pub fn cycles(&self) -> u64 {
         self.cycles
     }
 
-    /// Reset cycle counter
-    pub fn reset_cycles(&mut self) {
-        self.cycles = 0;
+    /// Get memory timing cycles (flash/RAM wait states, matches CEmu's DMA timing)
+    pub fn mem_cycles(&self) -> u64 {
+        self.mem_cycles
     }
 
-    /// Add cycles (for CPU internal operations)
+    /// Get total cycles (CPU + memory timing combined)
+    pub fn total_cycles(&self) -> u64 {
+        self.cycles + self.mem_cycles
+    }
+
+    /// Reset cycle counters
+    pub fn reset_cycles(&mut self) {
+        self.cycles = 0;
+        self.mem_cycles = 0;
+    }
+
+    /// Add CPU cycles (for internal CPU operations like branch taken, HALT, etc.)
     pub fn add_cycles(&mut self, count: u64) {
         self.cycles += count;
+    }
+
+    /// Add memory timing cycles (for memory access wait states)
+    pub fn add_mem_cycles(&mut self, count: u64) {
+        self.mem_cycles += count;
     }
 
     /// Get direct access to VRAM for LCD rendering
@@ -831,7 +884,7 @@ impl Bus {
     /// Based on CEmu's port.c port_map array
     pub fn port_read(&mut self, port: u16) -> u8 {
         let range = (port >> 12) & 0xF;
-        self.cycles += Self::PORT_READ_CYCLES[range as usize];
+        self.mem_cycles += Self::PORT_READ_CYCLES[range as usize];
         let keys = *self.ports.key_state();
 
         match range {
@@ -919,13 +972,19 @@ impl Bus {
     /// Write to I/O port (for OUT instructions)
     pub fn port_write(&mut self, port: u16, value: u8) {
         let range = (port >> 12) & 0xF;
-        self.cycles += Self::PORT_WRITE_CYCLES[range as usize];
+        // Note: port write cycles are added at the END of this function
+        // so they're counted after any potential cycle reset
 
         match range {
             0x0 => {
                 // Control ports - mask with 0xFF
                 let offset = (port & 0xFF) as u32;
                 self.ports.control.write(offset, value);
+                // CEmu: sched_set_clock() resets cycle counter on CPU speed change
+                // Reset BEFORE adding port write cycles so they're counted after reset
+                if self.ports.control.cpu_speed_changed() {
+                    self.reset_cycles();
+                }
             }
             0x1 => {
                 // Flash controller - mask with 0xFF
@@ -1012,10 +1071,17 @@ impl Bus {
                 // Control ports alternate - mask with 0xFF
                 let offset = (port & 0xFF) as u32;
                 self.ports.control.write(offset, value);
+                // CEmu: sched_set_clock() resets cycle counter on CPU speed change
+                // Reset BEFORE adding port write cycles so they're counted after reset
+                if self.ports.control.cpu_speed_changed() {
+                    self.reset_cycles();
+                }
             }
             // Unimplemented: USB(3), Protected(9), Cxxx(C), UART(E)
             _ => {}
         }
+        // Add port write cycles AFTER potential reset so they're counted
+        self.mem_cycles += Self::PORT_WRITE_CYCLES[range as usize];
     }
 
     /// Reset bus and all memory to initial state
@@ -1206,41 +1272,42 @@ mod tests {
         let mut bus = Bus::new();
 
         // Verify exact cycle counts match documented wait states
-        assert_eq!(bus.cycles(), 0);
+        // Memory timing now goes to mem_cycles (separate from CPU cycles)
+        assert_eq!(bus.mem_cycles(), 0);
 
         // RAM read: 4 cycles (3 wait states + 1)
         bus.read_byte(0xD00000);
-        assert_eq!(bus.cycles(), Bus::RAM_READ_CYCLES);
+        assert_eq!(bus.mem_cycles(), Bus::RAM_READ_CYCLES);
 
         bus.reset_cycles();
 
         // RAM write: 2 cycles (1 wait state + 1)
         bus.write_byte(0xD00000, 0x00);
-        assert_eq!(bus.cycles(), Bus::RAM_WRITE_CYCLES);
+        assert_eq!(bus.mem_cycles(), Bus::RAM_WRITE_CYCLES);
 
         bus.reset_cycles();
 
         // Flash read: 10 cycles (high wait states)
         bus.read_byte(0x000000);
-        assert_eq!(bus.cycles(), Bus::FLASH_READ_CYCLES);
+        assert_eq!(bus.mem_cycles(), Bus::FLASH_READ_CYCLES);
 
         bus.reset_cycles();
 
-        // Memory-mapped I/O read: 3 cycles (MMIO default)
+        // Memory-mapped I/O read: port-specific cycles (port 0 = 2 cycles)
         bus.read_byte(0xE00000);
-        assert_eq!(bus.cycles(), Bus::MMIO_READ_CYCLES);
+        assert_eq!(bus.mem_cycles(), Bus::PORT_READ_CYCLES[0]);
 
         bus.reset_cycles();
 
-        // Memory-mapped I/O write: 3 cycles (MMIO default)
+        // Memory-mapped I/O write: port-specific cycles (port 0 = 2 cycles)
         bus.write_byte(0xE00000, 0x00);
-        assert_eq!(bus.cycles(), Bus::MMIO_WRITE_CYCLES);
+        assert_eq!(bus.mem_cycles(), Bus::PORT_WRITE_CYCLES[0]);
 
         bus.reset_cycles();
 
-        // Unmapped read: 2 cycles
+        // Unmapped read: 258 cycles in parallel flash mode (default)
         bus.read_byte(0x500000);
-        assert_eq!(bus.cycles(), Bus::UNMAPPED_CYCLES);
+        assert_eq!(bus.mem_cycles(), Bus::UNMAPPED_PARALLEL_CYCLES);
     }
 
     #[test]

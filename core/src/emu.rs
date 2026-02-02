@@ -995,6 +995,12 @@ impl Emu {
         self.total_cycles
     }
 
+    /// Get raw bus cycle counter (resets on CPU speed change like CEmu)
+    /// This matches CEmu's cpu.cycles counter for trace comparison.
+    pub fn bus_cycles(&self) -> u64 {
+        self.bus.total_cycles()
+    }
+
     /// Peek at a memory byte without affecting emulation state
     pub fn peek_byte(&mut self, addr: u32) -> u8 {
         self.bus.peek_byte(addr)
