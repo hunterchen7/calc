@@ -996,9 +996,19 @@ impl Emu {
     }
 
     /// Get raw bus cycle counter (resets on CPU speed change like CEmu)
-    /// This matches CEmu's cpu.cycles counter for trace comparison.
+    /// This returns total cycles (CPU + memory timing).
     pub fn bus_cycles(&self) -> u64 {
         self.bus.total_cycles()
+    }
+
+    /// Get CPU-only cycle counter (matches CEmu's cpu.cycles for trace comparison)
+    /// This excludes memory timing - only counts internal CPU events like:
+    /// - Branch taken cycles
+    /// - HALT cycles
+    /// - (HL) operand cycles
+    /// - Block instruction internal cycles
+    pub fn cpu_cycles(&self) -> u64 {
+        self.bus.cycles()
     }
 
     /// Peek at a memory byte without affecting emulation state

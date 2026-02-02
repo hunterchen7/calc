@@ -232,7 +232,8 @@ fn cmd_trace(max_steps: u64) {
     println!("=== Trace Generation ({} steps) ===", max_steps);
     println!("Output: {}", output_path);
 
-    // Log initial state - use bus_cycles() for raw counter (resets on CPU speed change like CEmu)
+    // Log initial state - use bus_cycles() which includes memory timing
+    // CEmu's cpu.cycles also includes memory access cycles (flash wait states, etc.)
     let initial_cycles = emu.bus_cycles();
     log_trace_line(&mut writer, &mut emu, 0, initial_cycles);
 
@@ -247,7 +248,7 @@ fn cmd_trace(max_steps: u64) {
         emu.run_cycles(1);
         step += 1;
 
-        // Use raw bus cycle counter which resets on CPU speed change (matches CEmu)
+        // Use total bus cycles (CPU + memory timing, matches CEmu's approach)
         cycles = emu.bus_cycles();
 
         // Debug: print detailed info for early steps
