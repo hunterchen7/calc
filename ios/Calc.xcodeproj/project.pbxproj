@@ -361,6 +361,8 @@
 				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = (
 					"-lemu_core",
+					"-lemu_rust",
+					"-lemu_cemu",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.calc.emulator;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -398,6 +400,8 @@
 				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = (
 					"-lemu_core",
+					"-lemu_rust",
+					"-lemu_cemu",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.calc.emulator;
 				PRODUCT_NAME = "$(TARGET_NAME)";
