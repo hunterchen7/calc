@@ -76,14 +76,12 @@ impl WasmEmu {
     /// Returns RGBA8888 format suitable for ImageData.
     #[wasm_bindgen]
     pub fn get_framebuffer_rgba(&self) -> Vec<u8> {
-        let (width, height) = self.inner.framebuffer_size();
-        let ptr = self.inner.framebuffer_ptr();
-        let len = width * height;
+        let framebuffer = self.inner.framebuffer_data();
+        let len = framebuffer.len();
 
         // Convert from ARGB8888 to RGBA8888 for canvas
         let mut rgba = Vec::with_capacity(len * 4);
-        for i in 0..len {
-            let argb = unsafe { *ptr.add(i) };
+        for &argb in framebuffer {
             let a = ((argb >> 24) & 0xFF) as u8;
             let r = ((argb >> 16) & 0xFF) as u8;
             let g = ((argb >> 8) & 0xFF) as u8;
