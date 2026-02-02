@@ -83,6 +83,10 @@ web-cemu:
 		echo "Error: Emscripten not found. Install with: brew install emscripten"; \
 		exit 1; \
 	fi
+	@if [ ! -d "cemu-ref" ]; then \
+		echo "Cloning CEmu reference repository..."; \
+		git clone --depth 1 https://github.com/CE-Programming/CEmu.git cemu-ref; \
+	fi
 	$(MAKE) -C cemu-ref/core -f emscripten.mk wasm
 	@echo "Copying CEmu WASM to web app..."
 	mkdir -p web/src/cemu-core
