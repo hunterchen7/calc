@@ -1,0 +1,154 @@
+// CEmu WASM emulator backend
+
+import type { EmulatorBackend } from './types';
+
+// CEmu Module type
+interface CEmuModule {
+  FS: {
+    writeFile(path: string, data: Uint8Array): void;
+    readdir(path: string): string[];
+    chdir(path: string): void;
+  };
+  HEAPU8: Uint8Array;
+  HEAPU32: Uint32Array;
+  _malloc(size: number): number;
+  _free(ptr: number): void;
+  _emu_init(romPathPtr: number): number;
+  _emu_step(frames: number): void;
+  _emu_reset(): void;
+  _lcd_get_frame(): number;
+  _emu_keypad_event(row: number, col: number, press: boolean): void;
+}
+
+export class CEmuBackend implements EmulatorBackend {
+  readonly name = 'CEmu (Reference)';
+  private module: CEmuModule | null = null;
+  private _isInitialized = false;
+  private _isRomLoaded = false;
+
+  get isInitialized(): boolean {
+    return this._isInitialized;
+  }
+
+  get isRomLoaded(): boolean {
+    return this._isRomLoaded;
+  }
+
+  async init(): Promise<void> {
+    // Set up globals that CEmu expects
+    (globalThis as any).emul_is_inited = false;
+    (globalThis as any).emul_is_paused = true;
+    (globalThis as any).initFuncs = () => {};
+    (globalThis as any).initLCD = () => {};
+    (globalThis as any).enableGUI = () => {};
+    (globalThis as any).disableGUI = () => {};
+
+    // Dynamically import CEmu module
+    const { default: WebCEmu } = await import('../cemu-core/WebCEmu.js');
+
+    this.module = await WebCEmu({
+      print: (text: string) => console.log('[CEmu]', text),
+      printErr: (text: string) => console.error('[CEmu]', text),
+      locateFile: (path: string) => {
+        if (path.endsWith('.wasm')) {
+          return new URL('../cemu-core/WebCEmu.wasm', import.meta.url).href;
+        }
+        return path;
+      },
+      noExitRuntime: true,
+    }) as CEmuModule;
+
+    this._isInitialized = true;
+  }
+
+  destroy(): void {
+    this.module = null;
+    this._isInitialized = false;
+    this._isRomLoaded = false;
+  }
+
+  async loadRom(data: Uint8Array): Promise<number> {
+    if (!this.module) throw new Error('Backend not initialized');
+
+    // Write ROM to virtual filesystem
+    this.module.FS.writeFile('/CE.rom', data);
+    this.module.FS.chdir('/');
+
+    // Initialize emulator with ROM
+    const romPath = '/CE.rom';
+    const romPathBytes = new TextEncoder().encode(romPath + '\0');
+    const romPathPtr = this.module._malloc(romPathBytes.length);
+    this.module.HEAPU8.set(romPathBytes, romPathPtr);
+
+    const result = this.module._emu_init(romPathPtr);
+    this.module._free(romPathPtr);
+
+    if (result === 0) {
+      this._isRomLoaded = true;
+    }
+
+    return result;
+  }
+
+  powerOn(): void {
+    // CEmu handles power on during init/reset
+  }
+
+  reset(): void {
+    if (!this.module) throw new Error('Backend not initialized');
+    this.module._emu_reset();
+  }
+
+  runCycles(_cycles: number): number {
+    // CEmu uses frame-based stepping, not cycle-based
+    // Run approximately 1 frame worth
+    this.runFrame();
+    return _cycles;
+  }
+
+  runFrame(): void {
+    if (!this.module) throw new Error('Backend not initialized');
+    this.module._emu_step(1);
+  }
+
+  getFramebufferWidth(): number {
+    return 320;
+  }
+
+  getFramebufferHeight(): number {
+    return 240;
+  }
+
+  getFramebufferRGBA(): Uint8Array {
+    if (!this.module) throw new Error('Backend not initialized');
+
+    const framePtr = this.module._lcd_get_frame();
+    if (!framePtr) {
+      return new Uint8Array(320 * 240 * 4);
+    }
+
+    // CEmu framebuffer is 320x240 RGBA (but may be in different order)
+    const width = 320;
+    const height = 240;
+    const result = new Uint8Array(width * height * 4);
+
+    // Copy and convert from CEmu's format (ABGR) to RGBA
+    const heapu32 = new Uint32Array(this.module.HEAPU8.buffer, framePtr, width * height);
+    for (let i = 0; i < width * height; i++) {
+      const pixel = heapu32[i];
+      // CEmu uses ABGR format, we need RGBA
+      result[i * 4 + 0] = (pixel >> 0) & 0xFF;  // R (from B position in ABGR)
+      result[i * 4 + 1] = (pixel >> 8) & 0xFF;  // G
+      result[i * 4 + 2] = (pixel >> 16) & 0xFF; // B (from R position in ABGR)
+      result[i * 4 + 3] = 255; // A (always opaque)
+    }
+
+    return result;
+  }
+
+  setKey(row: number, col: number, down: boolean): void {
+    if (!this.module) return;
+    // Use emu_keypad_event which takes row, col directly
+    this.module._emu_keypad_event(row, col, down);
+  }
+}

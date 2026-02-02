@@ -548,6 +548,11 @@ impl Emu {
         self.framebuffer.as_ptr()
     }
 
+    /// Get framebuffer as a slice (safe access)
+    pub fn framebuffer_data(&self) -> &[u32] {
+        &self.framebuffer
+    }
+
     /// Set key state
     /// Special handling for ON key (row 2, col 0) which has dedicated interrupt
     /// Set key state in the keypad matrix.

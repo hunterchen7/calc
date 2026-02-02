@@ -1,0 +1,589 @@
+import { useEffect, useRef, useState, useCallback } from 'react';
+import { createBackend, type EmulatorBackend, type BackendType } from './emulator';
+import { Keypad } from './components/keypad';
+
+// Bundled ROM (gitignored, not in public repo)
+// Uses import.meta.glob to gracefully handle missing file
+const romModules = import.meta.glob('./assets/CE.rom', { query: '?url', import: 'default' });
+const romLoader = romModules['./assets/CE.rom'] as (() => Promise<string>) | undefined;
+
+async function loadBundledRom(): Promise<Uint8Array | null> {
+  if (!romLoader) return null;
+  try {
+    const romUrl = await romLoader();
+    const response = await fetch(romUrl);
+    if (response.ok) {
+      return new Uint8Array(await response.arrayBuffer());
+    }
+  } catch {
+    // ROM failed to load
+  }
+  return null;
+}
+
+// TI-84 Plus CE keypad layout (matches iOS KeypadView.swift)
+// Maps keyboard keys to [row, col] positions
+const KEY_MAP: Record<string, [number, number]> = {
+  // Function keys (row 1)
+  'F1': [1, 4], // Y=
+  'F2': [1, 3], // Window
+  'F3': [1, 2], // Zoom
+  'F4': [1, 1], // Trace
+  'F5': [1, 0], // Graph
+  // Shift (2nd) handled specially - only triggers on release if no other key pressed
+  'Escape': [1, 6], // Mode
+  'Backspace': [1, 7], // Del
+  'Delete': [1, 7], // Del
+
+  // Row 2: on, sto, ln, log, x², x⁻¹, math, alpha
+  'o': [2, 0], // ON
+  'O': [2, 0], // ON
+  'Insert': [2, 1], // Sto
+  'l': [2, 2], // Ln
+  'L': [2, 2], // Ln
+  'g': [2, 3], // Log
+  'G': [2, 3], // Log
+  'r': [2, 5], // x⁻¹
+  'R': [2, 5], // x⁻¹
+  'm': [2, 6], // Math
+  'M': [2, 6], // Math
+  'Alt': [2, 7], // Alpha
+
+  // Row 3: 0, 1, 4, 7, comma, sin, apps, X,T,θ,n
+  '0': [3, 0],
+  '1': [3, 1],
+  '4': [3, 2],
+  '7': [3, 3],
+  ',': [3, 4],
+  's': [3, 5], // Sin
+  'S': [3, 5], // Sin
+  'Home': [3, 6], // Apps
+  'x': [3, 7], // X,T,θ,n
+  'X': [3, 7], // X,T,θ,n
+
+  // Row 4: ., 2, 5, 8, (, cos, prgm, stat
+  '.': [4, 0],
+  '2': [4, 1],
+  '5': [4, 2],
+  '8': [4, 3],
+  '(': [4, 4],
+  'c': [4, 5], // Cos
+  'C': [4, 5], // Cos
+  'PageDown': [4, 6], // Prgm
+  'End': [4, 7], // Stat
+
+  // Row 5: (-), 3, 6, 9, ), tan, vars
+  '_': [5, 0], // (-)
+  '3': [5, 1],
+  '6': [5, 2],
+  '9': [5, 3],
+  ')': [5, 4],
+  't': [5, 5], // Tan
+  'T': [5, 5], // Tan
+  'PageUp': [5, 6], // Vars
+
+  // Row 6: enter, +, -, ×, ÷, ^, clear
+  'Enter': [6, 0],
+  '+': [6, 1],
+  '-': [6, 2],
+  '*': [6, 3], // ×
+  '/': [6, 4], // ÷
+  '^': [6, 5],
+  'Clear': [6, 6],
+
+  // Row 7: D-pad (down, left, right, up)
+  'ArrowDown': [7, 0],
+  'ArrowLeft': [7, 1],
+  'ArrowRight': [7, 2],
+  'ArrowUp': [7, 3],
+};
+
+interface CalculatorProps {
+  className?: string;
+  defaultBackend?: BackendType;
+  useBundledRom?: boolean;
+  fullscreen?: boolean;
+}
+
+export function Calculator({ className, defaultBackend = 'rust', useBundledRom = true, fullscreen = false }: CalculatorProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const backendRef = useRef<EmulatorBackend | null>(null);
+  const animationRef = useRef<number>(0);
+  const [backendType, setBackendType] = useState<BackendType>(defaultBackend);
+  const [isRunning, setIsRunning] = useState(false);
+  const [romLoaded, setRomLoaded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [initialized, setInitialized] = useState(false);
+  const [fps, setFps] = useState(0);
+  const [backendName, setBackendName] = useState('');
+  const [speed, setSpeed] = useState(1); // Speed multiplier (0.25x to 4x)
+  const lastFrameTime = useRef(0);
+  const frameCount = useRef(0);
+  const romDataRef = useRef<Uint8Array | null>(null);
+  const speedRef = useRef(1); // Ref for use in animation loop
+
+  // Initialize backend
+  useEffect(() => {
+    let cancelled = false;
+    const oldBackend = backendRef.current;
+    const oldAnimation = animationRef.current;
+
+    // Clean up old backend synchronously first
+    if (oldAnimation) {
+      cancelAnimationFrame(oldAnimation);
+      animationRef.current = 0;
+    }
+
+    // Clear the ref before destroying to prevent any in-flight calls
+    backendRef.current = null;
+
+    // Small delay to let any pending operations complete
+    const cleanup = () => {
+      if (oldBackend) {
+        oldBackend.destroy();
+      }
+    };
+
+    // Defer cleanup to next tick to avoid race conditions
+    setTimeout(cleanup, 0);
+
+    const initBackend = async () => {
+      setInitialized(false);
+      setRomLoaded(false);
+      setIsRunning(false);
+      setError(null);
+
+      try {
+        const backend = createBackend(backendType);
+        await backend.init();
+
+        if (cancelled) {
+          // Component unmounted or backend changed during init
+          backend.destroy();
+          return;
+        }
+
+        backendRef.current = backend;
+        setBackendName(backend.name);
+        setInitialized(true);
+
+        // If we had a ROM loaded, reload it
+        if (romDataRef.current) {
+          const result = await backend.loadRom(romDataRef.current);
+          if (result === 0) {
+            backend.powerOn();
+            setRomLoaded(true);
+            setIsRunning(true); // Auto-start after backend switch
+          } else {
+            setError(`Failed to load ROM with ${backend.name}: error code ${result}`);
+          }
+        } else if (useBundledRom) {
+          // Try to load bundled ROM
+          const bundledData = await loadBundledRom();
+          if (bundledData) {
+            romDataRef.current = bundledData;
+            const result = await backend.loadRom(bundledData);
+            if (result === 0) {
+              backend.powerOn();
+              setRomLoaded(true);
+              setIsRunning(true);
+            }
+          }
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(`Failed to initialize ${backendType} backend: ${err}`);
+        }
+      }
+    };
+
+    initBackend();
+
+    return () => {
+      cancelled = true;
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
+        animationRef.current = 0;
+      }
+      // Don't destroy here - will be handled on next init or unmount
+    };
+  }, [backendType, useBundledRom]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
+      }
+      if (backendRef.current) {
+        backendRef.current.destroy();
+        backendRef.current = null;
+      }
+    };
+  }, []);
+
+  // Handle ROM file loading
+  const handleRomLoad = useCallback(async (file: File) => {
+    const backend = backendRef.current;
+    if (!backend) return;
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const data = new Uint8Array(buffer);
+      romDataRef.current = data; // Store for backend switching
+
+      const result = await backend.loadRom(data);
+
+      if (result === 0) {
+        console.log('ROM loaded successfully, calling power_on...');
+        backend.powerOn();
+        console.log('power_on complete');
+        setRomLoaded(true);
+        setIsRunning(true); // Auto-start
+        setError(null);
+      } else {
+        setError(`Failed to load ROM: error code ${result}`);
+      }
+    } catch (err) {
+      setError(`Failed to read ROM file: ${err}`);
+    }
+  }, []);
+
+  // Render frame to canvas
+  const renderFrame = useCallback(() => {
+    const backend = backendRef.current;
+    const canvas = canvasRef.current;
+    if (!backend || !canvas) return;
+
+    try {
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      const width = backend.getFramebufferWidth();
+      const height = backend.getFramebufferHeight();
+
+      // Get framebuffer as RGBA
+      const rgba = backend.getFramebufferRGBA();
+
+      // Create ImageData and draw - copy into a new Uint8ClampedArray
+      const clampedData = new Uint8ClampedArray(rgba.length);
+      clampedData.set(rgba);
+      const imageData = new ImageData(clampedData, width, height);
+      ctx.putImageData(imageData, 0, 0);
+    } catch (e) {
+      // Backend was destroyed during render - safe to ignore
+      console.warn('Render error (safe to ignore during backend switch):', e);
+    }
+  }, []);
+
+  // Update speed ref when speed changes
+  useEffect(() => {
+    speedRef.current = speed;
+  }, [speed]);
+
+  // Main emulation loop
+  useEffect(() => {
+    if (!isRunning || !romLoaded || !backendRef.current) return;
+
+    let accumulator = 0;
+
+    const loop = () => {
+      const backend = backendRef.current;
+      if (!backend) return;
+
+      try {
+        // Run frames based on speed multiplier
+        // Halve speed since requestAnimationFrame runs at ~120fps on high refresh displays
+        // Use accumulator for fractional speeds
+        accumulator += speedRef.current / 2;
+        while (accumulator >= 1) {
+          backend.runFrame();
+          accumulator -= 1;
+        }
+
+        // Render
+        renderFrame();
+      } catch (e) {
+        // Backend was destroyed during frame - safe to ignore
+        console.warn('Frame error (safe to ignore during backend switch):', e);
+        return;
+      }
+
+      // Calculate FPS
+      frameCount.current++;
+      const now = performance.now();
+      if (now - lastFrameTime.current >= 1000) {
+        setFps(frameCount.current);
+        frameCount.current = 0;
+        lastFrameTime.current = now;
+      }
+
+      animationRef.current = requestAnimationFrame(loop);
+    };
+
+    lastFrameTime.current = performance.now();
+    frameCount.current = 0;
+    animationRef.current = requestAnimationFrame(loop);
+
+    return () => {
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
+      }
+    };
+  }, [isRunning, romLoaded, renderFrame]);
+
+  // Keyboard event handling
+  useEffect(() => {
+    const backend = backendRef.current;
+    if (!backend || !romLoaded) return;
+
+    // Track if Shift was pressed alone (for 2nd key)
+    let shiftPressedAlone = false;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Control shortcuts
+      if (e.key === ' ') {
+        e.preventDefault();
+        setIsRunning(prev => !prev);
+        return;
+      }
+
+      // Track Shift for 2nd key - only trigger on release if pressed alone
+      if (e.key === 'Shift') {
+        shiftPressedAlone = true;
+        return;
+      }
+
+      // If any other key is pressed while Shift is held, it's not a solo Shift press
+      if (e.shiftKey) {
+        shiftPressedAlone = false;
+      }
+
+      // Special combo keys (2nd + key sequences)
+      if (e.key === 'v' || e.key === 'V') {
+        e.preventDefault();
+        // Square root: 2nd + x²
+        backend.setKey(1, 5, true); // 2nd down
+        setTimeout(() => {
+          backend.setKey(1, 5, false); // 2nd up
+          backend.setKey(2, 4, true); // x² down
+          setTimeout(() => backend.setKey(2, 4, false), 50); // x² up
+        }, 50);
+        return;
+      }
+
+      // Don't intercept browser shortcuts (Ctrl/Cmd + key)
+      if (e.ctrlKey || e.metaKey) {
+        return;
+      }
+
+      const mapping = KEY_MAP[e.key];
+      if (mapping) {
+        e.preventDefault();
+        backend.setKey(mapping[0], mapping[1], true);
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      // Handle Shift release - trigger 2nd only if it was pressed alone
+      if (e.key === 'Shift') {
+        if (shiftPressedAlone) {
+          // Tap 2nd key (press and release)
+          backend.setKey(1, 5, true);
+          setTimeout(() => backend.setKey(1, 5, false), 50);
+        }
+        shiftPressedAlone = false;
+        return;
+      }
+
+      const mapping = KEY_MAP[e.key];
+      if (mapping) {
+        e.preventDefault();
+        backend.setKey(mapping[0], mapping[1], false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [romLoaded, backendType]);
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      handleRomLoad(file);
+    }
+  };
+
+  const handleReset = () => {
+    if (backendRef.current) {
+      backendRef.current.reset();
+    }
+  };
+
+  const handleEjectRom = () => {
+    setIsRunning(false);
+    setRomLoaded(false);
+    romDataRef.current = null;
+    if (backendRef.current) {
+      backendRef.current.reset();
+    }
+  };
+
+  const handleBackendChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const newBackend = e.target.value as BackendType;
+    setBackendType(newBackend);
+  };
+
+  // Keypad handlers
+  const handleKeypadDown = useCallback((row: number, col: number) => {
+    if (backendRef.current) {
+      backendRef.current.setKey(row, col, true);
+    }
+  }, []);
+
+  const handleKeypadUp = useCallback((row: number, col: number) => {
+    if (backendRef.current) {
+      backendRef.current.setKey(row, col, false);
+    }
+  }, []);
+
+  // Calculate container width based on fullscreen mode
+  const containerWidth = fullscreen ? 'min(420px, 95vw, calc(95vh * 0.45))' : '360px';
+
+  return (
+    <div className={className} style={{
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      gap: fullscreen ? '0.5rem' : '1rem',
+      ...(fullscreen && { transform: 'scale(1)', transformOrigin: 'center center' })
+    }}>
+      {/* Header and backend selector - only on non-demo */}
+      {!useBundledRom && (
+        <>
+          <h1>TI-84 Plus CE Emulator</h1>
+
+          <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+            <label htmlFor="backend-select">Backend:</label>
+            <select
+              id="backend-select"
+              value={backendType}
+              onChange={handleBackendChange}
+              disabled={isRunning}
+              style={{ padding: '0.5rem' }}
+            >
+              <option value="rust">Rust (Custom)</option>
+              <option value="cemu">CEmu (Reference)</option>
+            </select>
+            {backendName && (
+              <span style={{ fontSize: '0.875rem', color: '#666' }}>
+                Using: {backendName}
+              </span>
+            )}
+          </div>
+        </>
+      )}
+
+      {error && (
+        <div style={{ color: 'red', padding: '0.5rem', background: '#fee', borderRadius: '4px' }}>
+          {error}
+        </div>
+      )}
+
+      {!initialized && <p>Loading {backendType === 'rust' ? 'Rust WASM' : 'CEmu WASM'} module...</p>}
+
+      {initialized && !romLoaded && (
+        <div style={{ padding: '1rem', border: '2px dashed #ccc', borderRadius: '8px' }}>
+          <label htmlFor="rom-input" style={{ cursor: 'pointer' }}>
+            <p>Select a TI-84 Plus CE ROM file (.rom)</p>
+            <input
+              id="rom-input"
+              type="file"
+              accept=".rom,.bin"
+              onChange={handleFileChange}
+              style={{ marginTop: '0.5rem' }}
+            />
+          </label>
+        </div>
+      )}
+
+      {romLoaded && (
+        <>
+          {/* Calculator container with screen and keypad */}
+          <div style={{
+            background: '#1B1B1B',
+            borderRadius: fullscreen ? '12px' : '16px',
+            padding: fullscreen ? '12px' : '16px',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+            width: containerWidth,
+          }}>
+            {/* Screen */}
+            <div style={{
+              background: '#000',
+              padding: '8px',
+              borderRadius: '8px',
+              marginBottom: '12px',
+            }}>
+              <canvas
+                ref={canvasRef}
+                width={320}
+                height={240}
+                style={{
+                  imageRendering: 'pixelated',
+                  width: '100%',
+                  height: 'auto',
+                  display: 'block',
+                }}
+              />
+            </div>
+
+            {/* Keypad */}
+            <Keypad onKeyDown={handleKeypadDown} onKeyUp={handleKeypadUp} />
+          </div>
+
+          {/* Controls - outside calculator */}
+          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'center' }}>
+            <button onClick={() => setIsRunning(!isRunning)} style={{ padding: '6px 16px' }} title="Space">
+              {isRunning ? 'Pause' : 'Run'}
+            </button>
+            <button onClick={handleReset} style={{ padding: '6px 16px' }} title="R">Reset</button>
+            {!useBundledRom && (
+              <button onClick={handleEjectRom} style={{ padding: '6px 16px' }} title="E">Eject</button>
+            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <input
+                type="range"
+                min="0.25"
+                max="4"
+                step="0.25"
+                value={speed}
+                onChange={(e) => setSpeed(parseFloat(e.target.value))}
+                style={{ width: '80px' }}
+                title="CPU Speed"
+              />
+              <span style={{ fontSize: '0.75rem', color: fullscreen ? '#888' : '#666', minWidth: '2.5rem' }}>
+                {speed}x
+              </span>
+            </div>
+            <span style={{ fontSize: '0.875rem', color: fullscreen ? '#888' : '#666' }}>
+              {fps} FPS
+            </span>
+          </div>
+
+          {/* Keyboard controls help */}
+          <div style={{ fontSize: '0.75rem', color: '#888', maxWidth: '360px', textAlign: 'center' }}>
+            <p><strong>Keyboard Controls:</strong></p>
+            <p>Numbers: 0-9 | Arrows: Navigate | Enter: Enter | Backspace: Del</p>
+            <p>+, -, *, / : Math | ( ) : Parens | ^: Power | V: √</p>
+            <p>Shift: 2nd | Alt: Alpha | Escape: Mode | O: ON | Space: Pause</p>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
