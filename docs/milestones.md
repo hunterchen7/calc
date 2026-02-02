@@ -180,17 +180,6 @@ cargo run --release --example debug -- compare <cemu_trace>  # Compare traces
 - VRAM base: 0xD40000
 - OS reaches idle state with interrupts enabled (EI + HALT)
 
-## Milestone 6: Persistence
-
-**Goal:** State survives app restarts.
-
-**Deliverables:**
-
-- [ ] Flash write/erase behavior
-- [ ] Save-state buffer APIs
-- [ ] Android save/load state
-- [ ] State persistence verified
-
 ## Milestone 6: Android Display Integration ✓
 
 **Goal:** Display emulator screen on Android device.
@@ -231,20 +220,61 @@ cargo run --release --example debug -- compare <cemu_trace>  # Compare traces
 - **CRITICAL**: TI-OS uses port I/O (port 0xA via IN/OUT) not memory-mapped writes, requiring both I/O paths to call any_key_check
 - **Expression parser initialization**: First key press after boot auto-injects ENTER to dismiss boot screen and initialize TI-OS parser state (see findings.md)
 
-## Milestone 7: Persistence
+## Milestone 7: iOS App ✓
+
+**Goal:** Port emulator to iOS platform.
+
+**Deliverables:**
+
+- [x] iOS app builds and runs with Swift/SwiftUI
+- [x] CEmu backend integration
+- [x] Rust backend integration
+- [x] Runtime backend switching between Rust and CEmu
+- [x] Swipe-to-open gesture for menu (replaced menu button)
+- [x] State persistence for Rust emulator backend
+
+## Milestone 8: Android Backend Switching ✓
+
+**Goal:** Support multiple emulator backends on Android.
+
+**Deliverables:**
+
+- [x] CEmu backend integration
+- [x] Runtime backend switching between Rust and CEmu
+- [x] Backend selection UI
+
+## Milestone 9: Persistence (In Progress)
 
 **Goal:** State survives app restarts.
 
 **Deliverables:**
 
 - [ ] Flash write/erase behavior
-- [ ] Save-state buffer APIs
-- [ ] Android save/load state
-- [ ] State persistence verified
+- [x] Rust backend: Save flash in state (now includes 4MB flash)
+- [x] Save-state buffer APIs (Rust: ~4.5MB with flash, CEmu: ~4.5MB)
+- [x] iOS save/load state (Rust backend)
+- [x] iOS save/load state (CEmu backend)
+- [x] Android save/load state
+- [ ] State persistence verified on both platforms
 
-## Milestone 8: Android Polish
+## Milestone 10: Web App (WASM)
 
-**Goal:** Production-ready Android app.
+**Goal:** Run emulator in web browser via WebAssembly.
+
+**Deliverables:**
+
+- [ ] Rust core compiles to WASM target
+- [ ] CEmu backend compiles to WASM (via Emscripten)
+- [ ] JavaScript/TypeScript bindings for emulator API
+- [ ] Web UI with canvas rendering
+- [ ] Keypad input handling (keyboard + touch)
+- [ ] Runtime backend switching in browser
+- [ ] ROM file loading via file picker
+- [ ] State persistence via IndexedDB/localStorage
+
+## Milestone 11: Polish
+
+**Goal:** Production-ready apps on all platforms.
 
 **Deliverables:**
 

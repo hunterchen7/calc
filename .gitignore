@@ -37,5 +37,20 @@ Thumbs.db
 *.ppm
 *.png
 
+# iOS build artifacts
+/ios/cemu/build-device/
+/ios/cemu/build-simulator/
+/ios/cemu/build-simulator-dual
+
+# Debug/test example scripts (one-off debugging files)
+/core/examples/check_*.rs
+/core/examples/*_check.rs
+/core/examples/*_trace.rs
+/core/examples/*_debug.rs
+/core/examples/*_test.rs
+/core/examples/*_compare.rs
+/core/examples/find_*.rs
+/core/examples/trace_*.rs
+
 # Claude Code local settings
 .claude/

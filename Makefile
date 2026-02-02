@@ -1,112 +1,93 @@
 # TI-84 CE Emulator Build Commands
 #
 # Quick reference:
-#   ./scripts/build.sh android [--debug] [--cemu] [--install] [--all-abis]
-#   ./scripts/build.sh ios [--debug] [--cemu] [--sim] [--open]
+#   ./scripts/build.sh android [--debug] [--rust|--cemu|--both] [--install]
+#   ./scripts/build.sh ios [--debug] [--rust|--cemu|--both] [--sim] [--open]
 
-.PHONY: android android-debug android-cemu android-install android-cemu-install \
-        ios ios-debug ios-cemu ios-sim ios-sim-cemu \
-        web web-cemu web-dev web-clean \
+.PHONY: android android-debug android-install android-both android-both-install \
+        android-cemu android-cemu-install \
+        ios ios-debug ios-sim ios-cemu ios-sim-cemu ios-both ios-sim-both \
         log-android test clean cemu cemu-test cemu-clean help
 
 #------------------------------------------------------------------------------
-# Android
+# Android - Rust only (default)
 #------------------------------------------------------------------------------
 
-# Android release (arm64, Rust)
+# Android release (arm64, Rust only)
 android:
-	./scripts/build.sh android
+	./scripts/build.sh android --rust
 
-# Android debug (arm64, Rust)
+# Android debug (arm64, Rust only)
 android-debug:
-	./scripts/build.sh android --debug
+	./scripts/build.sh android --rust --debug
 
-# Android release with CEmu backend
+# Android release + install (Rust only)
+android-install:
+	./scripts/build.sh android --rust --install
+
+#------------------------------------------------------------------------------
+# Android - Both backends (runtime switching)
+#------------------------------------------------------------------------------
+
+# Android release with both backends
+android-both:
+	./scripts/build.sh android --both
+
+# Android release with both backends + install
+android-both-install:
+	./scripts/build.sh android --both --install
+
+#------------------------------------------------------------------------------
+# Android - CEmu only
+#------------------------------------------------------------------------------
+
+# Android release with CEmu backend only
 android-cemu:
 	./scripts/build.sh android --cemu
-
-# Android release + install
-android-install:
-	./scripts/build.sh android --install
 
 # Android CEmu + install
 android-cemu-install:
 	./scripts/build.sh android --cemu --install
 
 #------------------------------------------------------------------------------
-# iOS
+# iOS - Rust only (default)
 #------------------------------------------------------------------------------
 
 # iOS device release (arm64, Rust)
 ios:
-	./scripts/build.sh ios
+	./scripts/build.sh ios --rust
 
 # iOS device debug (arm64, Rust)
 ios-debug:
-	./scripts/build.sh ios --debug
+	./scripts/build.sh ios --rust --debug
+
+# iOS Simulator (Rust)
+ios-sim:
+	./scripts/build.sh ios --rust --sim
+
+#------------------------------------------------------------------------------
+# iOS - Both backends (runtime switching)
+#------------------------------------------------------------------------------
+
+# iOS device release with both backends
+ios-both:
+	./scripts/build.sh ios --both
+
+# iOS Simulator with both backends
+ios-sim-both:
+	./scripts/build.sh ios --both --sim
+
+#------------------------------------------------------------------------------
+# iOS - CEmu only
+#------------------------------------------------------------------------------
 
 # iOS device release with CEmu backend
 ios-cemu:
 	./scripts/build.sh ios --cemu
 
-# iOS Simulator (Rust)
-ios-sim:
-	./scripts/build.sh ios --sim
-
 # iOS Simulator with CEmu backend
 ios-sim-cemu:
-	./scripts/build.sh ios --sim --cemu
-
-#------------------------------------------------------------------------------
-# Web
-#------------------------------------------------------------------------------
-
-# Web release (Rust WASM)
-web:
-	@echo "Building Rust WASM package..."
-	cd core && wasm-pack build --target web --release
-	@echo "Copying WASM package to web app..."
-	rm -rf web/src/emu-core
-	cp -r core/pkg web/src/emu-core
-	@echo "Installing npm dependencies..."
-	cd web && npm install
-	@echo "Building web app..."
-	cd web && npm run build
-	@echo ""
-	@echo "Done! Output in web/dist/"
-	@echo "To serve locally: cd web && npx serve dist"
-
-# Web release with CEmu backend (Emscripten)
-web-cemu:
-	@echo "Building CEmu WASM with Emscripten..."
-	@if ! command -v emcc >/dev/null 2>&1; then \
-		echo "Error: Emscripten not found. Install with: brew install emscripten"; \
-		exit 1; \
-	fi
-	@if [ ! -d "cemu-ref" ]; then \
-		echo "Cloning CEmu reference repository..."; \
-		git clone --depth 1 https://github.com/CE-Programming/CEmu.git cemu-ref; \
-	fi
-	$(MAKE) -C web -f cemu-emscripten.mk wasm
-	@echo "Copying CEmu WASM to web app..."
-	mkdir -p web/src/cemu-core
-	cp web/build-cemu/WebCEmu.js web/build-cemu/WebCEmu.wasm web/src/cemu-core/
-	@echo ""
-	@echo "CEmu WASM built! Files in web/src/cemu-core/"
-	@echo "Note: Web UI integration for CEmu backend not yet implemented"
-
-# Web development server
-web-dev:
-	@if [ ! -d "web/src/emu-core" ]; then \
-		echo "WASM package not found. Building first..."; \
-		$(MAKE) web; \
-	fi
-	cd web && npm run dev
-
-# Clean web artifacts
-web-clean:
-	rm -rf web/dist web/node_modules web/src/emu-core web/src/cemu-core
-	rm -rf core/pkg
+	./scripts/build.sh ios --cemu --sim
 
 #------------------------------------------------------------------------------
 # Utilities
@@ -117,7 +98,7 @@ log-android:
 	@echo "Capturing Android emulator logs..."
 	@echo "Press Ctrl+C to stop logging"
 	@adb logcat -c
-	@adb logcat EmuCore:V EmuJNI:V MainActivity:D *:S | tee emulator_logs.txt
+	@adb logcat EmuCore:V EmuJNI:V EmuBackend:V EmulatorBridge:V MainActivity:D *:S | tee emulator_logs.txt
 
 # Run Rust tests
 test:
@@ -129,7 +110,6 @@ clean:
 	-cd android && ./gradlew clean
 	rm -rf android/app/.cxx android/app/build/intermediates/cmake
 	rm -rf ios/build ios/cemu/build-* ios/DerivedData
-	rm -rf web/dist web/src/emu-core web/src/cemu-core core/pkg
 
 #------------------------------------------------------------------------------
 # CEmu (reference emulator for macOS)
@@ -165,29 +145,35 @@ help:
 	@echo "  ./scripts/build.sh <platform> [options]"
 	@echo ""
 	@echo "  Platforms: android, ios"
-	@echo "  Options:   --debug, --cemu, --install, --sim, --open, --all-abis"
+	@echo "  Options:   --debug, --rust, --cemu, --both, --install, --sim, --open"
 	@echo ""
 	@echo "Make targets (shortcuts):"
 	@echo ""
-	@echo "  Android:"
+	@echo "  Android (Rust only - default):"
 	@echo "    make android              Release, arm64, Rust"
 	@echo "    make android-debug        Debug, arm64, Rust"
-	@echo "    make android-cemu         Release, arm64, CEmu"
-	@echo "    make android-install      Release, arm64, Rust + install"
-	@echo "    make android-cemu-install Release, arm64, CEmu + install"
+	@echo "    make android-install      Release + install, Rust"
 	@echo ""
-	@echo "  iOS:"
+	@echo "  Android (Both backends - runtime switching):"
+	@echo "    make android-both         Release, both backends"
+	@echo "    make android-both-install Release + install, both backends"
+	@echo ""
+	@echo "  Android (CEmu only):"
+	@echo "    make android-cemu         Release, CEmu only"
+	@echo "    make android-cemu-install Release + install, CEmu"
+	@echo ""
+	@echo "  iOS (Rust only - default):"
 	@echo "    make ios             Release, device, Rust"
 	@echo "    make ios-debug       Debug, device, Rust"
-	@echo "    make ios-cemu        Release, device, CEmu"
 	@echo "    make ios-sim         Release, simulator, Rust"
-	@echo "    make ios-sim-cemu    Release, simulator, CEmu"
 	@echo ""
-	@echo "  Web:"
-	@echo "    make web             Build web app (Rust WASM)"
-	@echo "    make web-cemu        Build CEmu WASM (Emscripten)"
-	@echo "    make web-dev         Run web dev server"
-	@echo "    make web-clean       Clean web artifacts"
+	@echo "  iOS (Both backends - runtime switching):"
+	@echo "    make ios-both        Release, device, both backends"
+	@echo "    make ios-sim-both    Release, simulator, both backends"
+	@echo ""
+	@echo "  iOS (CEmu only):"
+	@echo "    make ios-cemu        Release, device, CEmu"
+	@echo "    make ios-sim-cemu    Release, simulator, CEmu"
 	@echo ""
 	@echo "  Utilities:"
 	@echo "    make test            Run Rust tests"

@@ -66,9 +66,23 @@ class MainActivity : ComponentActivity() {
     }
 
     private val emulator = EmulatorBridge()
+    private lateinit var stateManager: StateManager
+    private var currentRomHash: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Initialize state manager
+        stateManager = StateManager.getInstance(applicationContext)
+
+        // Initialize EmulatorBridge with application context
+        EmulatorBridge.initialize(applicationContext)
+
+        // Load preferred backend
+        val preferredBackend = EmulatorPreferences.getEffectiveBackend(applicationContext)
+        if (preferredBackend != null) {
+            emulator.setBackend(preferredBackend)
+        }
 
         if (!emulator.create()) {
             Log.e(TAG, "Failed to create emulator")
@@ -80,8 +94,33 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    EmulatorScreen(emulator)
+                    // Check for previously saved ROM
+                    val savedRomHash = EmulatorPreferences.getLastRomHash(applicationContext)
+
+                    EmulatorScreen(
+                        emulator = emulator,
+                        stateManager = stateManager,
+                        savedRomHash = savedRomHash,
+                        onRomLoaded = { hash ->
+                            currentRomHash = hash
+                            EmulatorPreferences.setLastRomHash(applicationContext, hash)
+                        },
+                        getCurrentRomHash = { currentRomHash }
+                    )
                 }
+            }
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // Save state when going to background
+        currentRomHash?.let { hash ->
+            Log.i(TAG, "Saving state on pause for ROM: $hash")
+            if (stateManager.saveState(emulator, hash)) {
+                Log.i(TAG, "State saved successfully")
+            } else {
+                Log.w(TAG, "Failed to save state")
             }
         }
     }
@@ -93,7 +132,13 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun EmulatorScreen(emulator: EmulatorBridge) {
+fun EmulatorScreen(
+    emulator: EmulatorBridge,
+    stateManager: StateManager,
+    savedRomHash: String?,
+    onRomLoaded: (String) -> Unit,
+    getCurrentRomHash: () -> String?
+) {
     val context = LocalContext.current
 
     // Emulator state
@@ -102,6 +147,43 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
     var romName by remember { mutableStateOf<String?>(null) }
     var romSize by remember { mutableIntStateOf(0) }
     var loadError by remember { mutableStateOf<String?>(null) }
+    var currentRomBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var currentRomHash by remember { mutableStateOf<String?>(null) }
+
+    // Try to auto-load saved ROM on first composition
+    LaunchedEffect(savedRomHash) {
+        if (savedRomHash != null && !romLoaded) {
+            val savedRomBytes = stateManager.loadRom(savedRomHash)
+            if (savedRomBytes != null) {
+                val result = emulator.loadRom(savedRomBytes)
+                if (result == 0) {
+                    romLoaded = true
+                    romName = "Saved ROM"
+                    romSize = savedRomBytes.size
+                    currentRomBytes = savedRomBytes
+                    currentRomHash = savedRomHash
+                    onRomLoaded(savedRomHash)
+
+                    // Restore saved state
+                    if (stateManager.loadState(emulator, savedRomHash)) {
+                        Log.i("EmulatorScreen", "Auto-restored saved state for ROM: $savedRomHash")
+                    }
+
+                    isRunning = true
+                    Log.i("EmulatorScreen", "Auto-loaded saved ROM: ${savedRomBytes.size} bytes")
+                } else {
+                    Log.e("EmulatorScreen", "Failed to auto-load ROM: $result")
+                }
+            } else {
+                Log.i("EmulatorScreen", "No saved ROM found for hash: $savedRomHash")
+            }
+        }
+    }
+
+    // Backend state
+    val availableBackends = remember { EmulatorBridge.getAvailableBackends() }
+    var currentBackend by remember { mutableStateOf(emulator.getCurrentBackend() ?: "") }
+    var showBackendDialog by remember { mutableStateOf(false) }
 
     // Debug info
     var totalCyclesExecuted by remember { mutableLongStateOf(0L) }
@@ -133,6 +215,16 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
                 inputStream?.use { stream ->
                     val romBytes = stream.readBytes()
                     romSize = romBytes.size
+                    currentRomBytes = romBytes
+
+                    // Compute ROM hash for state persistence
+                    val hash = stateManager.romHash(romBytes)
+                    currentRomHash = hash
+                    onRomLoaded(hash)
+
+                    // Save ROM copy to our storage
+                    stateManager.saveRom(romBytes, hash)
+
                     val result = emulator.loadRom(romBytes)
                     if (result == 0) {
                         romLoaded = true
@@ -141,7 +233,13 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
                         totalCyclesExecuted = 0L
                         frameCounter = 0
                         logLines.clear()
-                        isRunning = true  // Auto-start to show boot process
+
+                        // Try to restore saved state
+                        if (stateManager.loadState(emulator, hash)) {
+                            Log.i("EmulatorScreen", "Restored saved state for ROM: $hash")
+                        }
+
+                        isRunning = true  // Auto-start
                         Log.i("EmulatorScreen", "ROM loaded: ${romBytes.size} bytes")
                     } else {
                         loadError = "Failed to load ROM (error: $result)"
@@ -153,6 +251,44 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
                 Log.e("EmulatorScreen", "Error loading ROM", e)
             }
         }
+    }
+
+    // Backend switch handler
+    val onBackendSwitch: (String) -> Unit = { newBackend ->
+        if (newBackend != currentBackend) {
+            isRunning = false
+            emulator.destroy()
+
+            if (emulator.setBackend(newBackend)) {
+                EmulatorPreferences.setPreferredBackend(context, newBackend)
+                currentBackend = newBackend
+
+                if (emulator.create()) {
+                    // Reload ROM if we had one
+                    currentRomBytes?.let { romBytes ->
+                        val result = emulator.loadRom(romBytes)
+                        if (result == 0) {
+                            totalCyclesExecuted = 0L
+                            frameCounter = 0
+                            logLines.clear()
+                            isRunning = true
+                            Log.i("EmulatorScreen", "ROM reloaded after backend switch")
+                        } else {
+                            loadError = "Failed to reload ROM after backend switch"
+                            romLoaded = false
+                        }
+                    }
+                } else {
+                    loadError = "Failed to create emulator with new backend"
+                }
+            } else {
+                loadError = "Failed to switch backend to $newBackend"
+                // Try to restore previous backend
+                emulator.setBackend(currentBackend)
+                emulator.create()
+            }
+        }
+        showBackendDialog = false
     }
 
     // Emulation loop
@@ -193,11 +329,67 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
         }
     }
 
+    // Backend selection dialog
+    if (showBackendDialog && availableBackends.size > 1) {
+        AlertDialog(
+            onDismissRequest = { showBackendDialog = false },
+            title = { Text("Select Emulator Backend") },
+            text = {
+                Column {
+                    Text(
+                        "Switching backends will restart the emulator. Your current state will be lost.",
+                        color = Color.Gray,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(bottom = 16.dp)
+                    )
+                    availableBackends.forEach { backend ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = backend == currentBackend,
+                                onClick = { onBackendSwitch(backend) }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = backend.replaceFirstChar { it.uppercase() },
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = when (backend) {
+                                        "rust" -> "Custom Rust implementation"
+                                        "cemu" -> "CEmu reference emulator"
+                                        else -> ""
+                                    },
+                                    fontSize = 12.sp,
+                                    color = Color.Gray
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showBackendDialog = false }) {
+                    Text("Cancel")
+                }
+            },
+            containerColor = Color(0xFF1A1A2E)
+        )
+    }
+
     // Show ROM loading screen if no ROM loaded, otherwise show emulator
     if (!romLoaded) {
         RomLoadingScreen(
             onLoadRom = { romPicker.launch(arrayOf("*/*")) },
-            loadError = loadError
+            loadError = loadError,
+            currentBackend = currentBackend,
+            hasMultipleBackends = availableBackends.size > 1,
+            onShowBackendDialog = { showBackendDialog = true }
         )
     } else {
         EmulatorView(
@@ -223,6 +415,9 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
             onSpeedChange = { speedMultiplier = it },
             lastKeyPress = lastKeyPress,
             logs = logLines,
+            currentBackend = currentBackend,
+            hasMultipleBackends = availableBackends.size > 1,
+            onShowBackendDialog = { showBackendDialog = true },
             onKeyDown = { row, col ->
                 lastKeyPress = "($row,$col) DOWN"
                 Log.d("Keypad", "Key DOWN: row=$row col=$col")
@@ -250,7 +445,10 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
 @Composable
 fun RomLoadingScreen(
     onLoadRom: () -> Unit,
-    loadError: String?
+    loadError: String?,
+    currentBackend: String,
+    hasMultipleBackends: Boolean,
+    onShowBackendDialog: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -304,6 +502,32 @@ fun RomLoadingScreen(
 
         Spacer(modifier = Modifier.height(48.dp))
 
+        // Backend indicator and switch button
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(vertical = 8.dp)
+        ) {
+            Text(
+                text = "Backend: ",
+                fontSize = 14.sp,
+                color = Color.Gray
+            )
+            Text(
+                text = currentBackend.replaceFirstChar { it.uppercase() },
+                fontSize = 14.sp,
+                color = Color(0xFF4FC3F7),
+                fontWeight = FontWeight.Medium
+            )
+            if (hasMultipleBackends) {
+                Spacer(modifier = Modifier.width(8.dp))
+                TextButton(onClick = onShowBackendDialog) {
+                    Text("Change", fontSize = 12.sp)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
         Text(
             text = "You must provide your own legally obtained ROM file.",
             fontSize = 12.sp,
@@ -332,6 +556,9 @@ fun EmulatorView(
     onSpeedChange: (Float) -> Unit,
     lastKeyPress: String,
     logs: List<String>,
+    currentBackend: String,
+    hasMultipleBackends: Boolean,
+    onShowBackendDialog: () -> Unit,
     onKeyDown: (row: Int, col: Int) -> Unit,
     onKeyUp: (row: Int, col: Int) -> Unit
 ) {
@@ -437,7 +664,7 @@ fun EmulatorView(
 
                 // Speed control
                 Text(
-                    text = "Speed: ${speedMultiplier.toInt()}x",
+                    text = "Speed: ${if (speedMultiplier >= 1f) "${speedMultiplier.toInt()}x" else String.format("%.2fx", speedMultiplier)}",
                     color = Color.White,
                     fontSize = 14.sp,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
@@ -445,8 +672,8 @@ fun EmulatorView(
                 Slider(
                     value = speedMultiplier,
                     onValueChange = { onSpeedChange(it) },
-                    valueRange = 1f..10f,
-                    steps = 8,
+                    valueRange = 0.25f..5f,
+                    steps = 18,  // (5 - 0.25) / 0.25 - 1 = 18 steps for 0.25 increments
                     modifier = Modifier.padding(horizontal = 16.dp),
                     colors = SliderDefaults.colors(
                         thumbColor = Color(0xFF4CAF50),
@@ -454,6 +681,36 @@ fun EmulatorView(
                         inactiveTrackColor = Color(0xFF333344)
                     )
                 )
+
+                // Backend selection (only if multiple backends available)
+                if (hasMultipleBackends) {
+                    Divider(
+                        modifier = Modifier.padding(vertical = 8.dp),
+                        color = Color(0xFF333344)
+                    )
+
+                    NavigationDrawerItem(
+                        label = {
+                            Column {
+                                Text("Emulator Backend", color = Color.White)
+                                Text(
+                                    currentBackend.replaceFirstChar { it.uppercase() },
+                                    color = Color(0xFF4FC3F7),
+                                    fontSize = 12.sp
+                                )
+                            }
+                        },
+                        selected = false,
+                        onClick = {
+                            scope.launch { drawerState.close() }
+                            onShowBackendDialog()
+                        },
+                        colors = NavigationDrawerItemDefaults.colors(
+                            unselectedContainerColor = Color.Transparent
+                        ),
+                        modifier = Modifier.padding(horizontal = 12.dp)
+                    )
+                }
 
                 Spacer(modifier = Modifier.weight(1f))
 
@@ -472,6 +729,15 @@ fun EmulatorView(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
                     )
                 }
+
+                // Backend info (always shown)
+                Text(
+                    text = "Backend: ${currentBackend.replaceFirstChar { it.uppercase() }}",
+                    fontSize = 12.sp,
+                    color = Color(0xFF4FC3F7),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+
                 Spacer(modifier = Modifier.height(16.dp))
             }
         }
@@ -550,6 +816,12 @@ fun EmulatorView(
                         text = "ROM: ${romName ?: "Unknown"} (${romSize / 1024}KB)",
                         fontSize = 10.sp,
                         color = Color(0xFF4FC3F7),
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text(
+                        text = "Backend: ${currentBackend.replaceFirstChar { it.uppercase() }}",
+                        fontSize = 10.sp,
+                        color = Color(0xFFCE93D8),
                         fontFamily = FontFamily.Monospace
                     )
                     Text(

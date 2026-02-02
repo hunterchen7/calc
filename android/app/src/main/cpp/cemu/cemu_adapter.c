@@ -8,8 +8,18 @@
  * Define CEMU_PERF_INSTRUMENTATION to enable timing instrumentation.
  * This adds significant overhead (6+ syscalls per loop iteration) and should
  * only be used for debugging performance issues.
+ *
+ * Symbol Prefixing:
+ * Define IOS_PREFIXED to export functions with cemu_ prefix (for dual-backend iOS builds).
  */
 #include "emu.h"  // Our adapter header
+
+// Symbol prefixing for iOS dual-backend support
+#ifdef IOS_PREFIXED
+#define EMU_FUNC(name) cemu_##name
+#else
+#define EMU_FUNC(name) name
+#endif
 
 // CEmu headers
 #include "asic.h"
@@ -28,6 +38,12 @@
 #include <stdarg.h>
 #include <string.h>
 #include <stdbool.h>
+#include <unistd.h>  // For unlink()
+
+// CEmu state size: ~4.6MB (4MB flash + 406KB RAM + peripherals)
+// Use 5MB buffer for safety margin
+#define CEMU_STATE_SIZE (5 * 1024 * 1024)
+#define CEMU_IMAGE_VERSION 0xCECE001B
 
 #ifdef CEMU_PERF_INSTRUMENTATION
 #include <time.h>
@@ -62,6 +78,9 @@ struct Emu {
 static struct Emu* g_instance = NULL;
 static emu_log_cb_t g_log_callback = NULL;
 static char g_log_buffer[4096];
+
+// Temp directory for state save/load (Android doesn't have /tmp)
+static char g_temp_dir[512] = "/tmp";  // Default fallback for non-Android platforms
 
 // GUI callback implementations (required by CEmu core)
 void gui_console_clear(void) {
@@ -106,6 +125,18 @@ void gui_debug_open(int reason, uint32_t data) {
 }
 void gui_debug_close(void) {}
 #endif
+
+// ============================================================
+// Temp directory configuration (Android doesn't have /tmp)
+// ============================================================
+
+void EMU_FUNC(backend_set_temp_dir)(const char* path) {
+    if (path && strlen(path) < sizeof(g_temp_dir) - 1) {
+        strncpy(g_temp_dir, path, sizeof(g_temp_dir) - 1);
+        g_temp_dir[sizeof(g_temp_dir) - 1] = '\0';
+        gui_console_printf("[CEmu] Temp directory set to: %s\n", g_temp_dir);
+    }
+}
 
 // ============================================================
 // CEmu emu.c functions reimplemented (to avoid symbol conflicts)
@@ -273,7 +304,7 @@ static int cemu_load_rom_from_memory(const uint8_t *rom_data, size_t rom_size) {
 // Public API Implementation
 // ============================================================
 
-Emu* emu_create(void) {
+Emu* EMU_FUNC(emu_create)(void) {
     if (g_instance != NULL) {
         return NULL;
     }
@@ -287,7 +318,7 @@ Emu* emu_create(void) {
     return g_instance;
 }
 
-void emu_destroy(Emu* emu) {
+void EMU_FUNC(emu_destroy)(Emu* emu) {
     if (emu && emu == g_instance) {
         if (emu->initialized) {
             asic_free();
@@ -297,11 +328,11 @@ void emu_destroy(Emu* emu) {
     }
 }
 
-void emu_set_log_callback(emu_log_cb_t cb) {
+void EMU_FUNC(emu_set_log_callback)(emu_log_cb_t cb) {
     g_log_callback = cb;
 }
 
-int emu_load_rom(Emu* emu, const uint8_t* data, size_t len) {
+int EMU_FUNC(emu_load_rom)(Emu* emu, const uint8_t* data, size_t len) {
     if (!emu || emu != g_instance || !data || len == 0) {
         return -1;
     }
@@ -319,13 +350,13 @@ int emu_load_rom(Emu* emu, const uint8_t* data, size_t len) {
     return 0;
 }
 
-void emu_reset(Emu* emu) {
+void EMU_FUNC(emu_reset)(Emu* emu) {
     if (emu && emu == g_instance && emu->initialized) {
         asic_reset();
     }
 }
 
-int emu_run_cycles(Emu* emu, int cycles) {
+int EMU_FUNC(emu_run_cycles)(Emu* emu, int cycles) {
     if (!emu || emu != g_instance || !emu->initialized || cycles <= 0) {
         return 0;
     }
@@ -341,7 +372,7 @@ int emu_run_cycles(Emu* emu, int cycles) {
     return cycles;
 }
 
-const uint32_t* emu_framebuffer(const Emu* emu, int* w, int* h) {
+const uint32_t* EMU_FUNC(emu_framebuffer)(const Emu* emu, int* w, int* h) {
     // Always return valid dimensions (matches Rust implementation behavior)
     if (w) *w = LCD_WIDTH;
     if (h) *h = LCD_HEIGHT;
@@ -385,38 +416,163 @@ const uint32_t* emu_framebuffer(const Emu* emu, int* w, int* h) {
     return emu->framebuffer;
 }
 
-void emu_set_key(Emu* emu, int row, int col, int down) {
+void EMU_FUNC(emu_set_key)(Emu* emu, int row, int col, int down) {
     if (!emu || emu != g_instance || !emu->initialized) {
         return;
     }
     emu_keypad_event((unsigned int)row, (unsigned int)col, down != 0);
 }
 
-uint8_t emu_get_backlight(const Emu* emu) {
+uint8_t EMU_FUNC(emu_get_backlight)(const Emu* emu) {
     if (!emu || emu != g_instance || !emu->initialized) {
         return 0;
     }
     return backlight.brightness;
 }
 
-int emu_is_lcd_on(const Emu* emu) {
+int EMU_FUNC(emu_is_lcd_on)(const Emu* emu) {
     if (!emu || emu != g_instance || !emu->initialized) {
         return 0;
     }
     return (lcd.control & 1) ? 1 : 0;
 }
 
-size_t emu_save_state_size(const Emu* emu) {
-    (void)emu;
-    return 0;
+size_t EMU_FUNC(emu_save_state_size)(const Emu* emu) {
+    if (!emu || emu != g_instance || !emu->initialized) {
+        return 0;
+    }
+    return CEMU_STATE_SIZE;
 }
 
-int emu_save_state(const Emu* emu, uint8_t* out, size_t cap) {
-    (void)emu; (void)out; (void)cap;
+int EMU_FUNC(emu_save_state)(const Emu* emu, uint8_t* out, size_t cap) {
+    if (!emu || emu != g_instance || !emu->initialized) return -1;
+    if (!out || cap < CEMU_STATE_SIZE) return -101;  // Buffer too small
+
+    // Use temp file as intermediary (CEmu only supports FILE* API)
+    char temp_path[600];
+    snprintf(temp_path, sizeof(temp_path), "%s/cemu_state_save.img", g_temp_dir);
+    FILE* f = fopen(temp_path, "wb");
+    if (!f) {
+        gui_console_err_printf("[CEmu] Failed to create temp file: %s\n", temp_path);
+        return -2;
+    }
+
+    // Write version header
+    uint32_t version = CEMU_IMAGE_VERSION;
+    if (fwrite(&version, sizeof(version), 1, f) != 1) {
+        fclose(f);
+        unlink(temp_path);
+        return -3;
+    }
+
+    // Save state via CEmu's asic_save()
+    if (!asic_save(f)) {
+        fclose(f);
+        unlink(temp_path);
+        return -4;
+    }
+    fclose(f);
+
+    // Read temp file into output buffer
+    f = fopen(temp_path, "rb");
+    if (!f) {
+        unlink(temp_path);
+        return -5;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (size <= 0 || (size_t)size > cap) {
+        fclose(f);
+        unlink(temp_path);
+        return -101;
+    }
+
+    size_t bytes_read = fread(out, 1, (size_t)size, f);
+    fclose(f);
+    unlink(temp_path);
+
+    gui_console_printf("[CEmu] Saved state: %zu bytes\n", bytes_read);
+    return (bytes_read == (size_t)size) ? (int)bytes_read : -6;
+}
+
+int EMU_FUNC(emu_load_state)(Emu* emu, const uint8_t* data, size_t len) {
+    if (!emu || emu != g_instance || !emu->initialized) return -1;
+    if (!data || len < 8) return -105;  // Data corruption
+
+    // Verify version header
+    uint32_t version;
+    memcpy(&version, data, sizeof(version));
+    if (version != CEMU_IMAGE_VERSION) {
+        gui_console_err_printf("[CEmu] State version mismatch: got 0x%08X, expected 0x%08X\n",
+                               version, CEMU_IMAGE_VERSION);
+        return -103;  // Version mismatch
+    }
+
+    // Write to temp file
+    char temp_path[600];
+    snprintf(temp_path, sizeof(temp_path), "%s/cemu_state_load.img", g_temp_dir);
+    FILE* f = fopen(temp_path, "wb");
+    if (!f) {
+        gui_console_err_printf("[CEmu] Failed to create temp file: %s\n", temp_path);
+        return -2;
+    }
+
+    if (fwrite(data, 1, len, f) != len) {
+        fclose(f);
+        unlink(temp_path);
+        return -3;
+    }
+    fclose(f);
+
+    // Load via CEmu's asic_restore()
+    f = fopen(temp_path, "rb");
+    if (!f) {
+        unlink(temp_path);
+        return -4;
+    }
+
+    // Skip version header (already verified)
+    fseek(f, sizeof(uint32_t), SEEK_SET);
+
+    bool success = asic_restore(f);
+    fclose(f);
+    unlink(temp_path);
+
+    if (success) {
+        gui_console_printf("[CEmu] Restored state: %zu bytes\n", len);
+        return 0;
+    } else {
+        gui_console_err_printf("[CEmu] Failed to restore state\n");
+        return -105;  // Data corruption
+    }
+}
+
+// ============================================================
+// Backend API (for single-backend builds without bridge)
+// ============================================================
+#ifndef IOS_PREFIXED
+
+const char* emu_backend_get_available(void) {
+    return "cemu";
+}
+
+const char* emu_backend_get_current(void) {
+    return "cemu";
+}
+
+int emu_backend_set(const char* name) {
+    // Only "cemu" is available in single-backend build
+    if (name && strcmp(name, "cemu") == 0) {
+        return 0;
+    }
     return -1;
 }
 
-int emu_load_state(Emu* emu, const uint8_t* data, size_t len) {
-    (void)emu; (void)data; (void)len;
-    return -1;
+int emu_backend_count(void) {
+    return 1;
 }
+
+#endif /* !IOS_PREFIXED */

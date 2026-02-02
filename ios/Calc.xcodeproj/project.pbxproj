@@ -18,6 +18,8 @@
 		A10000009 /* KeyButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000018 /* KeyButton.swift */; };
 		A1000000A /* DebugOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000019 /* DebugOverlayView.swift */; };
 		A1000000B /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000001A /* Assets.xcassets */; };
+		A1000000C /* EmulatorPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000001D /* EmulatorPreferences.swift */; };
+		A1000000D /* StateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000001F /* StateManager.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -35,6 +37,9 @@
 		A1000001A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A1000001B /* Calc-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Calc-Bridging-Header.h"; sourceTree = "<group>"; };
 		A1000001C /* emu.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = emu.h; sourceTree = "<group>"; };
+		A1000001D /* EmulatorPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmulatorPreferences.swift; sourceTree = "<group>"; };
+		A1000001E /* emu_backend.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = emu_backend.h; sourceTree = "<group>"; };
+		A1000001F /* StateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StateManager.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -65,6 +70,7 @@
 				A10000044 /* Views */,
 				A10000045 /* Bridge */,
 				A10000046 /* Models */,
+				A10000048 /* Persistence */,
 				A10000047 /* Resources */,
 			);
 			path = Calc;
@@ -74,6 +80,7 @@
 			isa = PBXGroup;
 			children = (
 				A1000001C /* emu.h */,
+				A1000001E /* emu_backend.h */,
 			);
 			path = include;
 			sourceTree = "<group>";
@@ -112,6 +119,7 @@
 			isa = PBXGroup;
 			children = (
 				A10000013 /* KeyDef.swift */,
+				A1000001D /* EmulatorPreferences.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -122,6 +130,14 @@
 				A1000001A /* Assets.xcassets */,
 			);
 			path = Resources;
+			sourceTree = "<group>";
+		};
+		A10000048 /* Persistence */ = {
+			isa = PBXGroup;
+			children = (
+				A1000001F /* StateManager.swift */,
+			);
+			path = Persistence;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -203,6 +219,8 @@
 				A10000008 /* DPadView.swift in Sources */,
 				A10000009 /* KeyButton.swift in Sources */,
 				A1000000A /* DebugOverlayView.swift in Sources */,
+				A1000000C /* EmulatorPreferences.swift in Sources */,
+				A1000000D /* StateManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -355,6 +373,8 @@
 				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = (
 					"-lemu_core",
+					"-lemu_rust",
+					"-lemu_cemu",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.calc.emulator;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -392,6 +412,8 @@
 				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = (
 					"-lemu_core",
+					"-lemu_rust",
+					"-lemu_cemu",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.calc.emulator;
 				PRODUCT_NAME = "$(TARGET_NAME)";
