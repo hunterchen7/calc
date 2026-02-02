@@ -181,27 +181,27 @@ export function Keypad({ onKeyDown, onKeyUp }: KeypadProps) {
         </div>
 
         {/* Column 2: 7, 4, 1, 0 */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: ROW_SPACING }}>
-          {renderKey(k('7', 3, 3, 'white', 'u', 'O'), '100%', NUMBER_BUTTON_HEIGHT)}
-          {renderKey(k('4', 3, 2, 'white', 'L4', 'T'), '100%', NUMBER_BUTTON_HEIGHT)}
-          {renderKey(k('1', 3, 1, 'white', 'L1', 'Y'), '100%', NUMBER_BUTTON_HEIGHT)}
-          {renderKey(k('0', 3, 0, 'white', 'catalog'), '100%', NUMBER_BUTTON_HEIGHT)}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: ROW_SPACING, alignItems: 'center' }}>
+          {renderKey(k('7', 3, 3, 'white', 'u', 'O'), '80%', NUMBER_BUTTON_HEIGHT)}
+          {renderKey(k('4', 3, 2, 'white', 'L4', 'T'), '80%', NUMBER_BUTTON_HEIGHT)}
+          {renderKey(k('1', 3, 1, 'white', 'L1', 'Y'), '80%', NUMBER_BUTTON_HEIGHT)}
+          {renderKey(k('0', 3, 0, 'white', 'catalog'), '80%', NUMBER_BUTTON_HEIGHT)}
         </div>
 
         {/* Column 3: 8, 5, 2, . */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: ROW_SPACING }}>
-          {renderKey(k('8', 4, 3, 'white', 'v', 'P'), '100%', NUMBER_BUTTON_HEIGHT)}
-          {renderKey(k('5', 4, 2, 'white', 'L5', 'U'), '100%', NUMBER_BUTTON_HEIGHT)}
-          {renderKey(k('2', 4, 1, 'white', 'L2', 'Z'), '100%', NUMBER_BUTTON_HEIGHT)}
-          {renderKey(k('.', 4, 0, 'white', 'i', ':'), '100%', NUMBER_BUTTON_HEIGHT)}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: ROW_SPACING, alignItems: 'center' }}>
+          {renderKey(k('8', 4, 3, 'white', 'v', 'P'), '80%', NUMBER_BUTTON_HEIGHT)}
+          {renderKey(k('5', 4, 2, 'white', 'L5', 'U'), '80%', NUMBER_BUTTON_HEIGHT)}
+          {renderKey(k('2', 4, 1, 'white', 'L2', 'Z'), '80%', NUMBER_BUTTON_HEIGHT)}
+          {renderKey(k('.', 4, 0, 'white', 'i', ':'), '80%', NUMBER_BUTTON_HEIGHT)}
         </div>
 
         {/* Column 4: 9, 6, 3, (-) */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: ROW_SPACING }}>
-          {renderKey(k('9', 5, 3, 'white', 'w', 'Q'), '100%', NUMBER_BUTTON_HEIGHT)}
-          {renderKey(k('6', 5, 2, 'white', 'L6', 'V'), '100%', NUMBER_BUTTON_HEIGHT)}
-          {renderKey(k('3', 5, 1, 'white', 'L3', 'θ'), '100%', NUMBER_BUTTON_HEIGHT)}
-          {renderKey(k('(−)', 5, 0, 'white', 'ans', '?'), '100%', NUMBER_BUTTON_HEIGHT)}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: ROW_SPACING, alignItems: 'center' }}>
+          {renderKey(k('9', 5, 3, 'white', 'w', 'Q'), '80%', NUMBER_BUTTON_HEIGHT)}
+          {renderKey(k('6', 5, 2, 'white', 'L6', 'V'), '80%', NUMBER_BUTTON_HEIGHT)}
+          {renderKey(k('3', 5, 1, 'white', 'L3', 'θ'), '80%', NUMBER_BUTTON_HEIGHT)}
+          {renderKey(k('(−)', 5, 0, 'white', 'ans', '?'), '80%', NUMBER_BUTTON_HEIGHT)}
         </div>
 
         {/* Column 5: ×, −, +, enter */}

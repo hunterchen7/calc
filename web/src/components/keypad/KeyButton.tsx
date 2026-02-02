@@ -12,8 +12,8 @@ interface KeyButtonProps {
   height?: string | number;
 }
 
-const LABEL_HEIGHT = 12;
-const LABEL_FONT_SIZE = 9;
+const LABEL_HEIGHT = 15;
+const LABEL_FONT_SIZE = 12;
 
 export function KeyButton({ keyDef, onDown, onUp, width, height }: KeyButtonProps) {
   const [isPressed, setIsPressed] = useState(false);
