@@ -50,9 +50,10 @@ class EmulatorBridge {
         fun initialize(context: Context) {
             if (!initialized) {
                 val nativeLibDir = context.applicationInfo.nativeLibraryDir
-                nativeInit(nativeLibDir)
+                val cacheDir = context.cacheDir.absolutePath
+                nativeInit(nativeLibDir, cacheDir)
                 initialized = true
-                Log.i(TAG, "Initialized with native lib dir: $nativeLibDir")
+                Log.i(TAG, "Initialized with native lib dir: $nativeLibDir, cache dir: $cacheDir")
             }
         }
 
@@ -73,7 +74,7 @@ class EmulatorBridge {
 
         // Static native methods
         @JvmStatic
-        private external fun nativeInit(nativeLibDir: String)
+        private external fun nativeInit(nativeLibDir: String, cacheDir: String)
 
         @JvmStatic
         private external fun nativeGetAvailableBackends(): Array<String>?
@@ -278,6 +279,43 @@ class EmulatorBridge {
     fun isLcdOn(): Boolean {
         if (handle == 0L) return false
         return nativeIsLcdOn(handle)
+    }
+
+    // MARK: - State Persistence
+
+    /**
+     * Get the size required for save state buffer.
+     * @return Size in bytes, or 0 if not available
+     */
+    fun saveStateSize(): Long {
+        if (handle == 0L) return 0
+        return nativeSaveStateSize(handle)
+    }
+
+    /**
+     * Save the current emulator state.
+     * @return State data as ByteArray, or null on failure
+     */
+    fun saveState(): ByteArray? {
+        if (handle == 0L) return null
+
+        val size = nativeSaveStateSize(handle)
+        if (size <= 0) return null
+
+        val buffer = ByteArray(size.toInt())
+        val result = nativeSaveState(handle, buffer)
+
+        return if (result >= 0) buffer else null
+    }
+
+    /**
+     * Load a saved emulator state.
+     * @param stateData Previously saved state data
+     * @return 0 on success, negative error code on failure
+     */
+    fun loadState(stateData: ByteArray): Int {
+        if (handle == 0L) return -1
+        return nativeLoadState(handle, stateData)
     }
 
     // Instance native methods
