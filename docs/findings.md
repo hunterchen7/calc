@@ -1739,3 +1739,156 @@ gcc -I core -o test/fulltrace test/fulltrace.c -L core -lcemucore -lm
 ```
 
 _Tooling created: 2026-02-02_
+
+---
+
+## SPI Timing Divergence Analysis (2026-02-02)
+
+### Summary
+
+Comprehensive trace comparison revealed a divergence at **step 418749** caused by SPI STATUS register returning different values:
+- **Our emulator**: A=0x20 (tfve=2 in STATUS)
+- **CEmu**: A=0x00 (tfve=0 in STATUS)
+
+This causes a `JR NZ` branch to behave differently, leading to execution path divergence.
+
+### Root Cause
+
+The SPI TX FIFO valid entry count (`tfve`) differs between emulators at the same step:
+
+| Time | Our Emulator | CEmu |
+|------|--------------|------|
+| Step 418722-418730 | Write 3 bytes to DATA, tfve=3 | Same |
+| Step 418738 | Enable SPI (CR2=0x0101) | Same |
+| Step 418749 | STATUS read returns tfve=2 | STATUS read returns tfve=0 |
+
+Our SPI only completed 1 transfer (3→2), while CEmu completed all 3 (3→0).
+
+### Technical Details
+
+**Port Access:** `IN A,(C)` with BC=0x00D00D reads SPI STATUS register offset 0x0D (byte 1 of STATUS).
+
+**STATUS Register Format:**
+- Bits 12-15: tfve (TX FIFO valid entries)
+- Bits 4-7: rfve (RX FIFO valid entries)
+- Bit 2: transfer in progress
+- Bit 1: TX FIFO not full
+- Bit 0: RX FIFO full
+
+Reading byte 1 (offset 0x0D) returns `(STATUS >> 8) & 0xFF`, so tfve=2 returns 0x20.
+
+### Cause Analysis
+
+**CEmu's approach:** Uses a scheduler that fires `spi_event()` at precise cycle times. Transfers complete automatically even without port access.
+
+**Our approach:** Uses lazy evaluation - SPI state only updates during port reads/writes via `update()` function.
+
+**The gap:** Between SPI enable (step 418738) and STATUS read (step 418749), there are ~279 cycles. CEmu's scheduler processes all 3 transfers (each ~72 cycles). Our lazy approach only processes transfers when `update()` is called, which happens on the STATUS read.
+
+### Why Lazy Evaluation Falls Short
+
+Our `update()` function does process pending transfers:
+```rust
+while let Some(next_cycle) = self.next_event_cycle {
+    if current_cycles < next_cycle { break; }
+    // Complete transfer and start next...
+}
+```
+
+However, the issue may be:
+1. The `next_event_cycle` calculation differs from CEmu's scheduler timing
+2. The transfer completion chaining doesn't match CEmu's event-driven model
+3. CPU speed changes or cycle accounting drift affects the comparison
+
+### Recommended Fix
+
+Integrate SPI with the main scheduler (already stubbed as `EventId::Spi`):
+1. When transfer starts, schedule completion event: `scheduler.set(EventId::Spi, ticks)`
+2. In event handler, complete transfer and potentially schedule next
+3. Remove lazy `update()` loop
+
+This matches CEmu's architecture where `sched_set(SCHED_SPI, ticks)` precisely schedules `spi_event()`.
+
+### Impact
+
+- **Boot**: Completes successfully (divergence at step 418K is late in boot)
+- **Correctness**: Execution paths diverge after step ~700K
+- **Risk**: Programs relying on precise SPI timing may behave differently
+
+### Verification Commands
+
+```bash
+# Generate trace with SPI logging
+cd core && SPI_TRACE=1 cargo run --release --example debug -- trace 420000 2>&1 | grep '^\[spi\]'
+
+# Compare at divergence point
+python3 -c "
+# ... trace comparison script ...
+"
+```
+
+_Analysis completed: 2026-02-02_
+
+---
+
+## Cycle Parity Achievement and Remaining Issues (2026-02-02)
+
+### Summary
+
+Achieved **exact cycle parity with CEmu through 700K+ boot steps** after fixing:
+
+1. **LCD Write Delay** (bus.rs): Added `lcd_write_ctrl_delay()` matching CEmu's timing for LCD controller writes. At 48MHz with non-serial flash, also includes `cycles |= 1` alignment.
+
+2. **SPI Transfer Timing** (spi.rs): Fixed to always use `(divider + 1)` for transfer tick calculation. Previously RX-only transfers incorrectly used just `divider`.
+
+### Remaining Issue: Keypad INT_STATUS Divergence
+
+At step **702259**, execution diverges due to keypad INT_STATUS read returning different values:
+- **Our emulator**: A=0x04 (ANY_KEY bit set)
+- **CEmu**: A=0x00 (status clear)
+
+This causes a `RET Z` instruction to behave differently:
+- CEmu: Z flag set (A=0), RET executes, returns to 0x000F7B
+- Ours: Z flag clear (A=4), RET not taken, falls through to 0x0037ED
+
+### Technical Details
+
+**Sequence leading to divergence:**
+
+| Step | Action | Our State | CEmu State |
+|------|--------|-----------|------------|
+| 702239 | Write 0x01 to CONTROL (mode=1) | Mode 1 | Mode 1 |
+| 702245 | Write 0x04 to INT_ACK (mask) | Mask=0x04 | Mask=0x04 |
+| 702251 | Write 0xFF to INT_STATUS (clear) | Status should be 0 | Status=0 |
+| 702259 | Read INT_STATUS | Returns 0x04 | Returns 0x00 |
+
+**The mystery:** Writing 0xFF to INT_STATUS should clear all bits (write-1-to-clear). Then reading should return 0. But we return 0x04 (ANY_KEY bit set).
+
+### Suspected Cause
+
+When INT_STATUS is written, our code sets `needs_any_key_check = true` and calls `any_key_check()`. If `any_key_check()` sees any key state (even stale edge flags), it sets `int_status |= ANY_KEY`.
+
+Possible issues:
+1. Edge flags not properly cleared from earlier operations
+2. `any_key_check()` running when it shouldn't
+3. Different timing of status bit operations vs CEmu
+
+### Impact
+
+- **Boot completes successfully** - divergence at 700K+ steps is during OS initialization
+- **Keys work correctly** - the actual key input path is functional
+- **Future debugging needed** - for applications requiring exact behavioral parity
+
+### Verification
+
+```bash
+# Generate 1M step trace
+cd core && cargo run --release --example debug -- fulltrace 1000000
+
+# Compare with CEmu trace
+python3 << 'EOF'
+# ... comparison script showing first register divergence ...
+EOF
+```
+
+_Analysis completed: 2026-02-02_
