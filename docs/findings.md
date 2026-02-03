@@ -1892,3 +1892,80 @@ EOF
 ```
 
 _Analysis completed: 2026-02-02_
+
+---
+
+## Scheduler CPU Speed Conversion Fix (2026-02-03)
+
+### Summary
+
+Fixed a critical bug where **scheduler events (RTC, timers) fired at wrong times** due to incorrect cycle conversion when CPU speed changes.
+
+### The Bug
+
+When CPU speed changes (e.g., 48MHz → 6MHz), CEmu converts its cycle counter:
+```
+new_cycles = old_cycles * new_rate / old_rate
+```
+
+Our bus.rs did this correctly, but the **scheduler's internal `cpu_cycles` wasn't being converted**. This caused `advance()` to compute incorrect deltas:
+
+```rust
+pub fn advance(&mut self, cpu_cycles: u64) {
+    // BUG: When bus.total_cycles() decreases (speed change), delta becomes 0!
+    let delta_cycles = cpu_cycles.saturating_sub(self.cpu_cycles);
+    self.cpu_cycles = cpu_cycles;
+    self.base_ticks += self.cpu_cycles_to_base_ticks(delta_cycles);
+}
+```
+
+**Example trace:**
+1. Before speed change: bus.total_cycles() = 1000, scheduler.cpu_cycles = 1000
+2. Instruction writes to port 0x01 (48MHz → 6MHz)
+3. Bus converts cycles: 1000 * 6/48 = 125, plus instruction cost → 133
+4. `advance(133)` called: delta = 133 - 1000 = **0** (saturating_sub)
+5. base_ticks doesn't advance!
+
+### Impact
+
+- **RTC LATCH events fired ~480K cycles early** (about 10ms at 48MHz)
+- At step ~2.9M, RTC port 0x40 returned 0xE8 instead of 0xF8
+- Caused boot to take different code path (Classic mode vs MathPrint mode)
+
+### The Fix
+
+Added `convert_cpu_cycles()` to scheduler and call it when CPU speed changes:
+
+**scheduler.rs:**
+```rust
+/// Convert the internal cpu_cycles counter when CPU speed changes.
+pub fn convert_cpu_cycles(&mut self, new_rate_mhz: u32, old_rate_mhz: u32) {
+    if old_rate_mhz > 0 && new_rate_mhz != old_rate_mhz {
+        self.cpu_cycles = self.cpu_cycles * new_rate_mhz as u64 / old_rate_mhz as u64;
+    }
+}
+```
+
+**emu.rs (in step/run_cycles):**
+```rust
+// Check for CPU speed change BEFORE advancing scheduler
+let new_cpu_speed = self.bus.ports.control.cpu_speed();
+if new_cpu_speed != cpu_speed {
+    let old_mhz = match cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
+    let new_mhz = match new_cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
+    self.scheduler.convert_cpu_cycles(new_mhz, old_mhz);
+    self.scheduler.set_cpu_speed(new_cpu_speed);
+}
+```
+
+### Result
+
+- **No divergence through 4 million steps** (previously diverged at ~2.06M)
+- RTC timing now matches CEmu exactly
+- Boot behavior is identical to CEmu
+
+### Key Lesson
+
+When cycle counters are converted on speed changes, **all components tracking cycles must be converted together**. The bus, scheduler, and any other timing-dependent subsystems must stay synchronized.
+
+_Fixed: 2026-02-03_

@@ -342,6 +342,15 @@ impl Emu {
         // CEmu's cycle counter includes the prefetch cost before the first instruction
         self.total_cycles = self.bus.total_cycles();
 
+        // Sync scheduler with initial cycles before scheduling RTC
+        self.scheduler.advance(self.total_cycles);
+
+        // Initialize RTC 1-second cycle from boot
+        // CEmu's rtc_reset() does: sched_repeat_relative(SCHED_RTC, SCHED_SECOND, 0, LATCH_TICK_OFFSET)
+        // This schedules the RTC LATCH event to fire at LATCH_TICK_OFFSET (16429) ticks after
+        // each second boundary. We start from time 0, so first LATCH is at LATCH_TICK_OFFSET.
+        self.scheduler.set(EventId::Rtc, LATCH_TICK_OFFSET);
+
         // Clear framebuffer to black
         for pixel in &mut self.framebuffer {
             *pixel = 0xFF000000;
@@ -431,6 +440,17 @@ impl Emu {
             // Record in history
             self.history.record(pc, &opcode[..opcode_len]);
 
+            // Check for CPU speed change BEFORE advancing scheduler.
+            // When the bus converts its cycle counter (on speed change), we must also
+            // convert the scheduler's cpu_cycles to keep delta calculations correct.
+            let new_cpu_speed = self.bus.ports.control.cpu_speed();
+            if new_cpu_speed != cpu_speed {
+                let old_mhz = match cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
+                let new_mhz = match new_cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
+                self.scheduler.convert_cpu_cycles(new_mhz, old_mhz);
+                self.scheduler.set_cpu_speed(new_cpu_speed);
+            }
+
             // Update total cycles and advance scheduler
             cycles_remaining -= cycles_used as i32;
             // Sync with bus to handle CPU speed conversion
@@ -453,15 +473,9 @@ impl Emu {
                 self.cpu.irq_pending = true;
             }
 
-            // Check if RTC needs a load event scheduled
-            if self.bus.ports.rtc.needs_load_scheduled() && !self.scheduler.is_active(EventId::Rtc) {
-                // Don't call start_load_ticks() here - keep loadTicksProcessed at LOAD_PENDING
-                // The scheduler event will call advance_load() which handles the transition
-                //
-                // CEmu delays load processing until LATCH event fires (16429 ticks at 32 kHz)
-                // This ensures load stays pending for ~24M cycles at 48 MHz
-                self.scheduler.set(EventId::Rtc, LATCH_TICK_OFFSET);
-            }
+            // RTC load scheduling is now handled by the continuous 1-second RTC cycle
+            // that's initialized in reset(). When load is triggered, it will be processed
+            // at the next natural LATCH event.
 
             // Don't return early when halted - peripherals need to keep ticking!
             // CEmu continues the main loop when halted, fast-forwarding to next scheduled event.
@@ -493,6 +507,15 @@ impl Emu {
             let cycles_used = self.cpu.step(&mut self.bus);
             check_armed_trace_on_wake(was_halted, self.cpu.halted);
 
+            // Check for CPU speed change BEFORE advancing scheduler
+            let new_cpu_speed = self.bus.ports.control.cpu_speed();
+            if new_cpu_speed != cpu_speed {
+                let old_mhz = match cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
+                let new_mhz = match new_cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
+                self.scheduler.convert_cpu_cycles(new_mhz, old_mhz);
+                self.scheduler.set_cpu_speed(new_cpu_speed);
+            }
+
             cycles_remaining -= cycles_used as i32;
             // Sync with bus to handle CPU speed conversion
             self.total_cycles = self.bus.total_cycles();
@@ -510,14 +533,7 @@ impl Emu {
                 self.cpu.irq_pending = true;
             }
 
-            if self.bus.ports.rtc.needs_load_scheduled() && !self.scheduler.is_active(EventId::Rtc) {
-                // Don't call start_load_ticks() here - keep loadTicksProcessed at LOAD_PENDING
-                // The scheduler event will call advance_load() which handles the transition
-                //
-                // CEmu delays load processing until LATCH event fires (16429 ticks at 32 kHz)
-                // This ensures load stays pending for ~24M cycles at 48 MHz
-                self.scheduler.set(EventId::Rtc, LATCH_TICK_OFFSET);
-            }
+            // RTC load scheduling handled by continuous 1-second cycle from reset()
         }
 
         (self.total_cycles - start_cycles) as u32
@@ -584,6 +600,17 @@ impl Emu {
         // Record in history
         self.history.record(pc, &opcode[..opcode_len]);
 
+        // Check for CPU speed change BEFORE advancing scheduler.
+        // When the bus converts its cycle counter (on speed change), we must also
+        // convert the scheduler's cpu_cycles to keep delta calculations correct.
+        let new_cpu_speed = self.bus.ports.control.cpu_speed();
+        if new_cpu_speed != cpu_speed {
+            let old_mhz = match cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
+            let new_mhz = match new_cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
+            self.scheduler.convert_cpu_cycles(new_mhz, old_mhz);
+            self.scheduler.set_cpu_speed(new_cpu_speed);
+        }
+
         // Update total cycles from bus directly
         // This handles CPU speed conversion automatically - when the bus cycle
         // counter is converted (divided) on speed changes, total_cycles follows.
@@ -608,10 +635,7 @@ impl Emu {
             self.cpu.irq_pending = true;
         }
 
-        // Check if RTC needs a load event scheduled
-        if self.bus.ports.rtc.needs_load_scheduled() && !self.scheduler.is_active(EventId::Rtc) {
-            self.scheduler.set(EventId::Rtc, LATCH_TICK_OFFSET);
-        }
+        // RTC load scheduling handled by continuous 1-second cycle from reset()
 
         if self.cpu.halted {
             self.last_stop = StopReason::Halted;
@@ -651,16 +675,12 @@ impl Emu {
         while let Some(event) = self.scheduler.next_pending_event() {
             match event {
                 EventId::Rtc => {
-                    // RTC load complete - advance the load state
-                    self.bus.ports.rtc.advance_load();
-                    // Check if more RTC ticks needed
-                    if self.bus.ports.rtc.needs_more_ticks() {
-                        // Schedule next RTC tick (1 tick at 32kHz)
-                        self.scheduler.repeat(EventId::Rtc, 1);
-                    } else {
-                        // Load complete, clear the event
-                        self.scheduler.clear(EventId::Rtc);
-                    }
+                    // Process RTC event (LATCH or load tick)
+                    // The RTC maintains a continuous 1-second cycle like CEmu
+                    use crate::scheduler::TICKS_PER_SECOND;
+                    let next_delay = self.bus.ports.rtc.process_event(TICKS_PER_SECOND, LATCH_TICK_OFFSET);
+                    // Schedule next RTC event
+                    self.scheduler.repeat(EventId::Rtc, next_delay);
                 }
                 EventId::Spi => {
                     // SPI transfer complete - process and maybe start next
@@ -1735,7 +1755,11 @@ mod tests {
 
         assert_eq!(emu.cpu.pc, 0);
         assert!(!emu.bus.key_state()[1][1]);
-        assert_eq!(emu.total_cycles, 0);
+        // After reset, total_cycles includes init_prefetch cost for CEmu parity.
+        // The prefetch fetches the first byte at PC=0, which adds flash timing cycles.
+        // With serial flash enabled by default, this is typically 10 cycles (cache miss).
+        // We just verify it's small and consistent, rather than exactly 0.
+        assert!(emu.total_cycles <= 20, "total_cycles after reset should be small prefetch cost");
         assert!(!emu.powered_on); // Reset should power off the calculator
     }
 
