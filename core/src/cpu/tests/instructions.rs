@@ -437,6 +437,7 @@ fn test_jp() {
     bus.poke_byte(1, 0x34);
     bus.poke_byte(2, 0x12);
     bus.poke_byte(3, 0x00);
+    cpu.init_prefetch(&mut bus); // Load first byte into prefetch
 
     cpu.step(&mut bus);
     assert_eq!(cpu.pc, 0x001234);
@@ -1420,6 +1421,7 @@ fn test_jp_ix() {
     // JP (IX) (DD E9)
     bus.poke_byte(0, 0xDD);
     bus.poke_byte(1, 0xE9);
+    cpu.init_prefetch(&mut bus); // Load first byte into prefetch
 
     step_full(&mut cpu, &mut bus);
     assert_eq!(cpu.pc, 0x001234);

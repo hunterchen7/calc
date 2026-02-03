@@ -433,11 +433,19 @@ impl Emu {
 
             // Update total cycles and advance scheduler
             cycles_remaining -= cycles_used as i32;
-            self.total_cycles += cycles_used as u64;
+            // Sync with bus to handle CPU speed conversion
+            self.total_cycles = self.bus.total_cycles();
             self.scheduler.advance(self.total_cycles);
 
             // Process pending scheduler events
             self.process_scheduler_events();
+
+            // Check if SPI needs initial scheduling (state changed via port write)
+            if self.bus.take_spi_schedule_flag() && !self.scheduler.is_active(EventId::Spi) {
+                if let Some(ticks) = self.bus.spi().try_start_transfer_for_scheduler() {
+                    self.scheduler.set(EventId::Spi, ticks);
+                }
+            }
 
             // Tick peripherals and check for interrupts
             let tick_irq = self.bus.ports.tick(cycles_used);
@@ -486,9 +494,17 @@ impl Emu {
             check_armed_trace_on_wake(was_halted, self.cpu.halted);
 
             cycles_remaining -= cycles_used as i32;
-            self.total_cycles += cycles_used as u64;
+            // Sync with bus to handle CPU speed conversion
+            self.total_cycles = self.bus.total_cycles();
             self.scheduler.advance(self.total_cycles);
             self.process_scheduler_events();
+
+            // Check if SPI needs initial scheduling (state changed via port write)
+            if self.bus.take_spi_schedule_flag() && !self.scheduler.is_active(EventId::Spi) {
+                if let Some(ticks) = self.bus.spi().try_start_transfer_for_scheduler() {
+                    self.scheduler.set(EventId::Spi, ticks);
+                }
+            }
 
             if self.bus.ports.tick(cycles_used) {
                 self.cpu.irq_pending = true;
@@ -568,12 +584,23 @@ impl Emu {
         // Record in history
         self.history.record(pc, &opcode[..opcode_len]);
 
-        // Update total cycles and advance scheduler
-        self.total_cycles += cycles_used as u64;
+        // Update total cycles from bus directly
+        // This handles CPU speed conversion automatically - when the bus cycle
+        // counter is converted (divided) on speed changes, total_cycles follows.
+        // Using bus.total_cycles() instead of accumulating ensures parity with CEmu's
+        // cpu.cycles which gets converted by sched_set_clock().
+        self.total_cycles = self.bus.total_cycles();
         self.scheduler.advance(self.total_cycles);
 
         // Process pending scheduler events
         self.process_scheduler_events();
+
+        // Check if SPI needs initial scheduling (state changed via port write)
+        if self.bus.take_spi_schedule_flag() && !self.scheduler.is_active(EventId::Spi) {
+            if let Some(ticks) = self.bus.spi().try_start_transfer_for_scheduler() {
+                self.scheduler.set(EventId::Spi, ticks);
+            }
+        }
 
         // Tick peripherals and check for interrupts
         let tick_irq = self.bus.ports.tick(cycles_used);
@@ -636,10 +663,14 @@ impl Emu {
                     }
                 }
                 EventId::Spi => {
-                    // SPI transfer complete
-                    // Note: SPI timing is currently handled internally via cycle-based update()
-                    // This is a stub for future scheduler integration
-                    self.scheduler.clear(EventId::Spi);
+                    // SPI transfer complete - process and maybe start next
+                    if let Some(ticks) = self.bus.spi().complete_transfer_and_continue() {
+                        // Another transfer started, reschedule
+                        self.scheduler.repeat(EventId::Spi, ticks);
+                    } else {
+                        // No more transfers pending
+                        self.scheduler.clear(EventId::Spi);
+                    }
                 }
                 EventId::Timer0 => {
                     // Timer 0 fired - raise TIMER1 interrupt (timers are 1-indexed in interrupt controller)

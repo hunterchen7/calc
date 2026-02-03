@@ -458,6 +458,19 @@ impl Cpu {
         self.prefetch = bus.fetch_byte(effective_addr, addr);
     }
 
+    /// Discard prefetch by reading from PC+1 without storing
+    ///
+    /// CEmu's cpu_prefetch_discard() reads memory at PC+1 but doesn't store
+    /// the result. This adds memory timing cycles for instructions like
+    /// JP (HL) and JP (IX) where we need to "throw away" the sequential
+    /// prefetch before loading the new target.
+    #[inline]
+    pub fn prefetch_discard(&self, bus: &mut Bus) {
+        let next_addr = self.mask_addr_instr(self.pc.wrapping_add(1));
+        // Read but discard - this adds the memory timing cycles
+        let _ = bus.fetch_byte(next_addr, self.pc.wrapping_add(1));
+    }
+
     // ========== Stack Operations ==========
     // NOTE: CEmu uses cpu.L mode for stack operations, selecting between
     // SPS (16-bit) and SPL (24-bit) stack pointers. We use a single SP
@@ -540,6 +553,8 @@ impl Cpu {
         let old_f3f5 = self.f & (flags::F5 | flags::F3);
         self.f = 0;
         self.set_sz_flags(result as u8);
+        // Clear F3/F5 that set_sz_flags computed from result, then restore old values
+        self.f &= !(flags::F5 | flags::F3);
         self.f |= old_f3f5; // Restore F3/F5
         self.set_flag_c(result > 0xFF);
         self.set_flag_h(half);
@@ -565,6 +580,8 @@ impl Cpu {
         let old_f3f5 = self.f & (flags::F5 | flags::F3);
         self.f = 0;
         self.set_sz_flags(result as u8);
+        // Clear F3/F5 that set_sz_flags computed from result, then restore old values
+        self.f &= !(flags::F5 | flags::F3);
         self.f |= old_f3f5; // Restore F3/F5 for all sub operations
         self.set_flag_c(result > 0xFF);
         self.set_flag_h(half);

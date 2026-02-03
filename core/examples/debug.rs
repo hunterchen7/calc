@@ -327,6 +327,8 @@ fn cmd_trace(max_steps: u64) {
 }
 
 /// Generate comprehensive trace with I/O operations (JSON format)
+/// NOTE: To match CEmu's format, "regs_before" actually contains the state AFTER
+/// the instruction executes (CEmu's naming is misleading).
 fn cmd_fulltrace(max_steps: u64) {
     let mut emu = match create_emu() {
         Some(e) => e,
@@ -354,22 +356,30 @@ fn cmd_fulltrace(max_steps: u64) {
     let mut step_count = 0u64;
     let mut first_entry = true;
 
+    // Buffer to hold previous step's info - we write prev step with current regs
+    // This matches CEmu's format where "regs_before" is actually post-execution state
+    let mut prev_step: Option<StepInfo> = None;
+
     while step_count < max_steps {
-        // Execute one instruction and get pre-execution state with I/O ops
+        // Execute one instruction and get state with I/O ops
         let step_info = match emu.step() {
             Some(info) => info,
             None => break,
         };
 
-        // Write JSON entry for this step
-        if !first_entry {
-            writeln!(writer, ",").expect("Failed to write");
-        }
-        first_entry = false;
+        // Write the PREVIOUS step's entry using CURRENT registers (post-execution)
+        if let Some(prev) = prev_step.take() {
+            if !first_entry {
+                writeln!(writer, ",").expect("Failed to write");
+            }
+            first_entry = false;
 
-        write_fulltrace_json(&mut writer, step_count, &step_info);
+            // Write prev step's PC/opcode but current step's registers (post-execution state)
+            write_fulltrace_json_with_post_regs(&mut writer, step_count - 1, &prev, &step_info);
+        }
 
         step_count += 1;
+        prev_step = Some(step_info.clone());
 
         if step_count % 10_000 == 0 {
             eprintln!("Progress: {} steps ({:.1}%)", step_count, 100.0 * step_count as f64 / max_steps as f64);
@@ -377,8 +387,68 @@ fn cmd_fulltrace(max_steps: u64) {
 
         if emu.is_halted() {
             eprintln!("HALT at step {} / cycle {}", step_count, step_info.total_cycles);
+            // Write final step - use current emulator state as post-execution registers
+            if let Some(prev) = prev_step.take() {
+                if !first_entry {
+                    writeln!(writer, ",").expect("Failed to write");
+                }
+                // Create pseudo StepInfo with current state
+                let final_regs = StepInfo {
+                    pc: emu.pc(),
+                    sp: emu.sp(),
+                    a: emu.a(),
+                    f: emu.f(),
+                    bc: emu.bc(),
+                    de: emu.de(),
+                    hl: emu.hl(),
+                    ix: emu.ix(),
+                    iy: emu.iy(),
+                    adl: emu.adl(),
+                    iff1: emu.iff1(),
+                    iff2: emu.iff2(),
+                    im: emu.interrupt_mode(),
+                    halted: emu.is_halted(),
+                    opcode: [0; 4],
+                    opcode_len: 0,
+                    cycles: 0,
+                    total_cycles: emu.total_cycles(),
+                    io_ops: vec![],
+                };
+                write_fulltrace_json_with_post_regs(&mut writer, step_count - 1, &prev, &final_regs);
+            }
             break;
         }
+    }
+
+    // Write final step if we didn't hit HALT
+    // For the last step, we need to capture current emulator state as post-execution registers
+    if let Some(prev) = prev_step {
+        if !first_entry {
+            writeln!(writer, ",").expect("Failed to write");
+        }
+        // Create a pseudo StepInfo with current emulator state for the final entry's registers
+        let final_regs = StepInfo {
+            pc: emu.pc(),
+            sp: emu.sp(),
+            a: emu.a(),
+            f: emu.f(),
+            bc: emu.bc(),
+            de: emu.de(),
+            hl: emu.hl(),
+            ix: emu.ix(),
+            iy: emu.iy(),
+            adl: emu.adl(),
+            iff1: emu.iff1(),
+            iff2: emu.iff2(),
+            im: emu.interrupt_mode(),
+            halted: emu.is_halted(),
+            opcode: [0; 4],
+            opcode_len: 0,
+            cycles: 0,
+            total_cycles: emu.total_cycles(),
+            io_ops: vec![],
+        };
+        write_fulltrace_json_with_post_regs(&mut writer, step_count - 1, &prev, &final_regs);
     }
 
     // Write JSON array end
@@ -387,6 +457,95 @@ fn cmd_fulltrace(max_steps: u64) {
     writer.flush().expect("Failed to flush output");
     println!("Full trace complete: {} steps", step_count);
     println!("Saved to: {}", output_path);
+}
+
+/// Write trace entry using previous step's PC/opcode but current step's registers
+/// This matches CEmu's format where "regs_before" is actually post-execution state
+fn write_fulltrace_json_with_post_regs(
+    writer: &mut BufWriter<File>,
+    step: u64,
+    prev_info: &StepInfo,
+    curr_info: &StepInfo,
+) {
+    // Disassemble the instruction
+    let disasm = disassemble(&prev_info.opcode[..prev_info.opcode_len], prev_info.adl);
+
+    // Format opcode bytes
+    let opcode_hex = prev_info.opcode[..prev_info.opcode_len]
+        .iter()
+        .map(|b| format!("{:02X}", b))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // CEmu reports cpu.cycles which is cycles AFTER instruction execution
+    // Use total_cycles directly to match CEmu's format
+    let cycles_after = prev_info.total_cycles;
+
+    // Start JSON object
+    write!(writer, "  {{\n").expect("Failed to write");
+    write!(writer, "    \"step\": {},\n", step).expect("Failed to write");
+    write!(writer, "    \"cycle\": {},\n", cycles_after).expect("Failed to write");
+    write!(writer, "    \"type\": \"instruction\",\n").expect("Failed to write");
+    write!(writer, "    \"pc\": \"0x{:06X}\",\n", prev_info.pc).expect("Failed to write");
+
+    // Opcode info
+    write!(writer, "    \"opcode\": {{\n").expect("Failed to write");
+    write!(writer, "      \"bytes\": \"{}\",\n", opcode_hex).expect("Failed to write");
+    write!(writer, "      \"mnemonic\": \"{}\"\n", escape_json(&disasm.mnemonic)).expect("Failed to write");
+    write!(writer, "    }},\n").expect("Failed to write");
+
+    // Registers - use CURRENT step's pre-state (which is prev step's post-state)
+    write!(writer, "    \"regs_before\": {{\n").expect("Failed to write");
+    write!(writer, "      \"A\": \"0x{:02X}\",\n", curr_info.a).expect("Failed to write");
+    write!(writer, "      \"F\": \"0x{:02X}\",\n", curr_info.f).expect("Failed to write");
+    write!(writer, "      \"BC\": \"0x{:06X}\",\n", curr_info.bc).expect("Failed to write");
+    write!(writer, "      \"DE\": \"0x{:06X}\",\n", curr_info.de).expect("Failed to write");
+    write!(writer, "      \"HL\": \"0x{:06X}\",\n", curr_info.hl).expect("Failed to write");
+    write!(writer, "      \"IX\": \"0x{:06X}\",\n", curr_info.ix).expect("Failed to write");
+    write!(writer, "      \"IY\": \"0x{:06X}\",\n", curr_info.iy).expect("Failed to write");
+    write!(writer, "      \"SP\": \"0x{:06X}\",\n", curr_info.sp).expect("Failed to write");
+    write!(writer, "      \"IFF1\": {},\n", curr_info.iff1).expect("Failed to write");
+    write!(writer, "      \"IFF2\": {},\n", curr_info.iff2).expect("Failed to write");
+    write!(writer, "      \"IM\": \"{:?}\",\n", curr_info.im).expect("Failed to write");
+    write!(writer, "      \"ADL\": {},\n", curr_info.adl).expect("Failed to write");
+    write!(writer, "      \"halted\": {}\n", curr_info.halted).expect("Failed to write");
+    write!(writer, "    }},\n").expect("Failed to write");
+
+    // I/O operations from the previous step
+    write!(writer, "    \"io_ops\": [\n").expect("Failed to write");
+    for (i, io_op) in prev_info.io_ops.iter().enumerate() {
+        let target_str = match io_op.target {
+            IoTarget::Ram => "ram",
+            IoTarget::Flash => "flash",
+            IoTarget::MmioPort => "mmio",
+            IoTarget::CpuPort => "port",
+        };
+        let op_type_str = match io_op.op_type {
+            IoOpType::Read => "read",
+            IoOpType::Write => "write",
+        };
+
+        write!(writer, "      {{\n").expect("Failed to write");
+        write!(writer, "        \"type\": \"{}\",\n", op_type_str).expect("Failed to write");
+        write!(writer, "        \"target\": \"{}\",\n", target_str).expect("Failed to write");
+        write!(writer, "        \"addr\": \"0x{:06X}\",\n", io_op.addr).expect("Failed to write");
+        if matches!(io_op.op_type, IoOpType::Write) {
+            write!(writer, "        \"old\": \"0x{:02X}\",\n", io_op.old_value).expect("Failed to write");
+            write!(writer, "        \"new\": \"0x{:02X}\"\n", io_op.new_value).expect("Failed to write");
+        } else {
+            write!(writer, "        \"value\": \"0x{:02X}\"\n", io_op.new_value).expect("Failed to write");
+        }
+        if i < prev_info.io_ops.len() - 1 {
+            write!(writer, "      }},\n").expect("Failed to write");
+        } else {
+            write!(writer, "      }}\n").expect("Failed to write");
+        }
+    }
+    write!(writer, "    ],\n").expect("Failed to write");
+
+    // Cycles used by this instruction
+    write!(writer, "    \"cycles\": {}\n", prev_info.cycles).expect("Failed to write");
+    write!(writer, "  }}").expect("Failed to write");
 }
 
 /// Write a single trace entry in JSON format
@@ -401,12 +560,14 @@ fn write_fulltrace_json(writer: &mut BufWriter<File>, step: u64, info: &StepInfo
         .collect::<Vec<_>>()
         .join(" ");
 
-    let cycles_before = info.total_cycles.saturating_sub(info.cycles as u64);
+    // CEmu reports cpu.cycles which is cycles AFTER instruction execution
+    // Use total_cycles directly to match CEmu's format
+    let cycles_after = info.total_cycles;
 
     // Start JSON object
     write!(writer, "  {{\n").expect("Failed to write");
     write!(writer, "    \"step\": {},\n", step).expect("Failed to write");
-    write!(writer, "    \"cycle\": {},\n", cycles_before).expect("Failed to write");
+    write!(writer, "    \"cycle\": {},\n", cycles_after).expect("Failed to write");
     write!(writer, "    \"type\": \"instruction\",\n").expect("Failed to write");
     write!(writer, "    \"pc\": \"0x{:06X}\",\n", info.pc).expect("Failed to write");
 

@@ -418,23 +418,17 @@ impl Cpu {
                         bus.add_cycles(1); // CEmu: cpu.cycles++ before cpu_halt()
                         self.halted = true;
                     } else {
-                        // LD r,r'
+                        // LD r,r' - CEmu's cpu_read_write_reg does NOT add extra cycles
+                        // Memory timing for (HL) operands comes from mem_read/mem_write
                         let val = self.get_reg8(z, bus);
                         self.set_reg8(y, val, bus);
-                        // CEmu: cpu.cycles += z == 6 || y == 6 for (HL) operand
-                        if z == 6 || y == 6 {
-                            bus.add_cycles(1);
-                        }
                     }
                 }
                 2 => {
-                    // ALU A,r
+                    // ALU A,r - CEmu's cpu_execute_alu does NOT add extra cycles
+                    // Memory timing for (HL) operands comes from mem_read_cpu
                     let val = self.get_reg8(z, bus);
                     self.execute_alu(y, val);
-                    // CEmu: cpu.cycles += z == 6 for (HL) operand
-                    if z == 6 {
-                        bus.add_cycles(1);
-                    }
                 }
                 3 => { self.execute_x3(bus, y, z, p, q); }
                 _ => {}

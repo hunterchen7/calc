@@ -348,6 +348,7 @@ impl Cpu {
                 // Uses L mode for stack operations, then ADL becomes L
                 bus.add_cycles(1); // CEmu: cpu.cycles++ before condition check
                 if self.check_cc(y) {
+                    bus.add_cycles(1); // CEmu: cpu.cycles++ at start of cpu_return()
                     let target = self.pop_addr(bus);
                     self.prefetch(bus, target); // Reload prefetch at return address
                     self.pc = target;
@@ -392,6 +393,8 @@ impl Cpu {
                         }
                         2 => {
                             // JP (HL)
+                            // CEmu: cpu_prefetch_discard() then cpu_jump()
+                            self.prefetch_discard(bus);
                             self.adl = self.l;
                             let target = self.wrap_pc(self.hl);
                             self.prefetch(bus, target); // Reload prefetch at target
@@ -2140,6 +2143,8 @@ impl Cpu {
                         }
                         2 => {
                             // JP (IX)/(IY)
+                            // CEmu: cpu_prefetch_discard() then cpu_jump()
+                            self.prefetch_discard(bus);
                             let index_reg = if use_ix { self.ix } else { self.iy };
                             self.adl = self.l;
                             let target = self.wrap_pc(index_reg);
