@@ -298,8 +298,9 @@ fn cmd_trace(max_steps: u64) {
             None => break,
         };
 
-        // Log the step with pre-execution state
-        log_step_info(&mut writer, step_count, &step_info);
+        // Log the step with pre-execution PC/opcode but post-execution registers
+        // This matches CEmu's trace format where registers show the result of execution
+        log_step_info_post(&mut writer, step_count, &step_info, &emu);
 
         // Debug: print detailed info for early steps
         if step_count < 10 {
@@ -728,7 +729,43 @@ fn extract_json_string(line: &str, key: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-/// Log a step using pre-execution state from StepInfo
+/// Log a step using pre-execution PC/opcode but post-execution registers
+/// This matches CEmu's trace behavior where:
+/// - PC and opcode are captured BEFORE execution (shows what instruction ran)
+/// - Registers are captured AFTER execution (shows the result)
+fn log_step_info_post(writer: &mut BufWriter<File>, step: u64, info: &StepInfo, emu: &Emu) {
+    // Use POST-execution register values from emu (like CEmu does)
+    let af = ((emu.a() as u16) << 8) | (emu.f() as u16);
+
+    // Format opcode bytes (from pre-execution state)
+    let op_str = match info.opcode_len {
+        4 => format!("{:02X}{:02X}{:02X}{:02X}", info.opcode[0], info.opcode[1], info.opcode[2], info.opcode[3]),
+        3 => format!("{:02X}{:02X}{:02X}", info.opcode[0], info.opcode[1], info.opcode[2]),
+        2 => format!("{:02X}{:02X}", info.opcode[0], info.opcode[1]),
+        _ => format!("{:02X}", info.opcode[0]),
+    };
+
+    let im = emu.interrupt_mode();
+    let im_str = format!("{:?}", im).replace("IM", "Mode");
+
+    // Use total_cycles after execution
+    let cycles_after = info.total_cycles;
+
+    writeln!(
+        writer,
+        "{:06} {:08} {:06X} {:06X} {:04X} {:06X} {:06X} {:06X} {:06X} {:06X} {} {} {} {} {} {}",
+        step, cycles_after, info.pc, emu.sp(), af, emu.bc(), emu.de(), emu.hl(), emu.ix(), emu.iy(),
+        if emu.adl() { 1 } else { 0 },
+        if emu.iff1() { 1 } else { 0 },
+        if emu.iff2() { 1 } else { 0 },
+        im_str,
+        if emu.is_halted() { 1 } else { 0 },
+        op_str
+    ).expect("Failed to write trace line");
+}
+
+/// Log a step using pre-execution state from StepInfo (legacy, for compatibility)
+#[allow(dead_code)]
 fn log_step_info(writer: &mut BufWriter<File>, step: u64, info: &StepInfo) {
     let af = ((info.a as u16) << 8) | (info.f as u16);
 
