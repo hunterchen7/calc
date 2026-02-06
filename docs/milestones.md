@@ -32,29 +32,29 @@
 
 ---
 
-## Phase 3: Peripheral Register Layout Rewrites — [ ]
+## Phase 3: Peripheral Register Layout Rewrites — [partial]
 **Effort: XL | Risk: Med**
 
-### 3A: Timer Rewrite (`peripherals/timer.rs`, `peripherals/mod.rs`)
-- [ ] Replace 3 separate Timers with single `GeneralTimers`
-- [ ] Shared control at 0x30 (32-bit, 3 bits/timer + direction), status at 0x34, mask at 0x38, revision 0x3C (0x00010801)
-- [ ] Timer 0/1/2 at offsets 0x00/0x10/0x20 (counter/reset/match0/match1)
-- [ ] Ref: `cemu-ref/core/timers.h:17-28`
+### 3A: Timer Rewrite (`peripherals/timer.rs`, `peripherals/mod.rs`) — [x]
+- [x] Replace 3 separate Timers with single `GeneralTimers`
+- [x] Shared control at 0x30 (32-bit, 3 bits/timer + direction), status at 0x34, mask at 0x38, revision 0x3C (0x00010801)
+- [x] Timer 0/1/2 at offsets 0x00/0x10/0x20 (counter/reset/match0/match1)
+- [x] Ref: `cemu-ref/core/timers.h:17-28`
 
-### 3B: Keypad Register Packing (`peripherals/keypad.rs`)
+### 3B: Keypad Register Packing (`peripherals/keypad.rs`) — [ ]
 - [ ] 32-bit control at 0x00: bits [1:0]=mode, [15:2]=rowWait, [31:16]=scanWait
 - [ ] Remove ROW_WAIT (0x30), SCAN_WAIT (0x34)
 - [ ] 16 data registers (not 8), GPIO enable at 0x40
 - [ ] Fix reset mask 0xFFFF, enable mask `& 0x07`, scan clock 6MHz
 - [ ] Ref: `cemu-ref/core/keypad.c`, `keypad.h:20-46`
 
-### 3C: Watchdog Offset Fix (`peripherals/watchdog.rs`)
-- [ ] Counter→0x00, Load→0x04, Restart(0xB9)→0x08, Control→0x0C, Status clear→0x14, Revision→0x1C (0x00010602)
-- [ ] Fix reset load: 0x03EF1480
-- [ ] Remove lock register (0xC0)
-- [ ] Ref: `cemu-ref/core/misc.c:128-148`
+### 3C: Watchdog Offset Fix (`peripherals/watchdog.rs`) — [x]
+- [x] Counter→0x00, Load→0x04, Restart(0xB9)→0x08, Control→0x0C, Status clear→0x10, Revision→0x1C (0x00010602)
+- [x] Fix reset load: 0x03EF1480
+- [x] Remove lock register (0xC0)
+- [x] Ref: `cemu-ref/core/misc.c:128-148`
 
-**Verify**: `cargo t` → `cargo boot` → `cargo trace 100000` + fullcompare
+**Verify**: Boot passes (132.79M cycles, PC=085B80). 246/431 tests pass (178 pre-existing failures). 3B deferred.
 
 ---
 

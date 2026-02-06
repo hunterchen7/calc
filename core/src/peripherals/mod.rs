@@ -31,7 +31,7 @@ pub use lcd::{LcdController, LCD_HEIGHT, LCD_WIDTH};
 pub use rtc::RtcController;
 pub use sha256::Sha256Controller;
 pub use spi::SpiController;
-pub use timer::Timer;
+pub use timer::GeneralTimers;
 pub use watchdog::WatchdogController;
 
 use interrupt::sources;
@@ -69,12 +69,8 @@ pub struct Peripherals {
     pub flash: FlashController,
     /// Interrupt controller
     pub interrupt: InterruptController,
-    /// Timer 1
-    pub timer1: Timer,
-    /// Timer 2
-    pub timer2: Timer,
-    /// Timer 3
-    pub timer3: Timer,
+    /// General purpose timers (3 timers with shared control/status)
+    pub timers: GeneralTimers,
     /// LCD controller
     pub lcd: LcdController,
     /// Keypad controller
@@ -114,9 +110,7 @@ impl Peripherals {
             control: ControlPorts::new(),
             flash: FlashController::new(),
             interrupt: InterruptController::new(),
-            timer1: Timer::new(),
-            timer2: Timer::new(),
-            timer3: Timer::new(),
+            timers: GeneralTimers::new(),
             lcd: LcdController::new(),
             keypad: KeypadController::new(),
             watchdog: WatchdogController::new(),
@@ -162,9 +156,7 @@ impl Peripherals {
         self.control.reset();
         self.flash.reset();
         self.interrupt.reset();
-        self.timer1.reset();
-        self.timer2.reset();
-        self.timer3.reset();
+        self.timers.reset();
         self.lcd.reset();
         self.keypad.reset();
         self.watchdog.reset();
@@ -210,28 +202,7 @@ impl Peripherals {
             a if a >= INT_BASE && a < INT_END => self.interrupt.read(a - INT_BASE),
 
             // Timers (0xF20000 - 0xF2003F)
-            a if a >= TIMER_BASE && a < TIMER_END => {
-                let offset = a - TIMER_BASE;
-                if offset >= 0x30 {
-                    // Timer control registers
-                    match offset {
-                        0x30 => self.timer1.read_control(),
-                        0x34 => self.timer2.read_control(),
-                        0x38 => self.timer3.read_control(),
-                        _ => 0x00,
-                    }
-                } else {
-                    // Timer data registers (0x10 bytes per timer)
-                    let timer_idx = offset / 0x10;
-                    let reg_offset = offset % 0x10;
-                    match timer_idx {
-                        0 => self.timer1.read(reg_offset),
-                        1 => self.timer2.read(reg_offset),
-                        2 => self.timer3.read(reg_offset),
-                        _ => 0x00,
-                    }
-                }
-            }
+            a if a >= TIMER_BASE && a < TIMER_END => self.timers.read(a - TIMER_BASE),
 
             // Keypad Controller (0xF50000 - 0xF5003F)
             a if a >= KEYPAD_BASE && a < KEYPAD_END => self.keypad.read(a - KEYPAD_BASE, key_state),
@@ -282,28 +253,7 @@ impl Peripherals {
             a if a >= INT_BASE && a < INT_END => self.interrupt.write(a - INT_BASE, value),
 
             // Timers (0xF20000 - 0xF2003F)
-            a if a >= TIMER_BASE && a < TIMER_END => {
-                let offset = a - TIMER_BASE;
-                if offset >= 0x30 {
-                    // Timer control registers
-                    match offset {
-                        0x30 => self.timer1.write_control(value),
-                        0x34 => self.timer2.write_control(value),
-                        0x38 => self.timer3.write_control(value),
-                        _ => {}
-                    }
-                } else {
-                    // Timer data registers (0x10 bytes per timer)
-                    let timer_idx = offset / 0x10;
-                    let reg_offset = offset % 0x10;
-                    match timer_idx {
-                        0 => self.timer1.write(reg_offset, value),
-                        1 => self.timer2.write(reg_offset, value),
-                        2 => self.timer3.write(reg_offset, value),
-                        _ => {}
-                    }
-                }
-            }
+            a if a >= TIMER_BASE && a < TIMER_END => self.timers.write(a - TIMER_BASE, value),
 
             // Keypad Controller (0xF50000 - 0xF5003F)
             a if a >= KEYPAD_BASE && a < KEYPAD_END => {
@@ -384,13 +334,14 @@ impl Peripherals {
     /// Returns true if any interrupt is pending
     pub fn tick(&mut self, cycles: u32) -> bool {
         // Tick timers
-        if self.timer1.tick(cycles) != 0 {
+        let timer_fired = self.timers.tick(cycles);
+        if timer_fired & 0x01 != 0 {
             self.interrupt.raise(sources::TIMER1);
         }
-        if self.timer2.tick(cycles) != 0 {
+        if timer_fired & 0x02 != 0 {
             self.interrupt.raise(sources::TIMER2);
         }
-        if self.timer3.tick(cycles) != 0 {
+        if timer_fired & 0x04 != 0 {
             self.interrupt.raise(sources::TIMER3);
         }
 
@@ -552,32 +503,15 @@ impl Peripherals {
         buf[pos..pos+4].copy_from_slice(&self.interrupt.inverted_word(0).to_le_bytes()); pos += 4;
         buf[pos..pos+4].copy_from_slice(&self.interrupt.inverted_word(1).to_le_bytes()); pos += 4;
 
-        // Timer 1 (24 bytes)
-        buf[pos..pos+4].copy_from_slice(&self.timer1.counter().to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.timer1.reset_value().to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.timer1.match1().to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.timer1.match2().to_le_bytes()); pos += 4;
-        buf[pos] = self.timer1.read_control(); pos += 1;
-        buf[pos..pos+4].copy_from_slice(&self.timer1.accum_cycles().to_le_bytes()); pos += 4;
-        pos += 3; // Padding to 24 bytes
-
-        // Timer 2 (24 bytes)
-        buf[pos..pos+4].copy_from_slice(&self.timer2.counter().to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.timer2.reset_value().to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.timer2.match1().to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.timer2.match2().to_le_bytes()); pos += 4;
-        buf[pos] = self.timer2.read_control(); pos += 1;
-        buf[pos..pos+4].copy_from_slice(&self.timer2.accum_cycles().to_le_bytes()); pos += 4;
-        pos += 3; // Padding to 24 bytes
-
-        // Timer 3 (24 bytes)
-        buf[pos..pos+4].copy_from_slice(&self.timer3.counter().to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.timer3.reset_value().to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.timer3.match1().to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.timer3.match2().to_le_bytes()); pos += 4;
-        buf[pos] = self.timer3.read_control(); pos += 1;
-        buf[pos..pos+4].copy_from_slice(&self.timer3.accum_cycles().to_le_bytes()); pos += 4;
-        pos += 3; // Padding to 24 bytes
+        // Timers (3 × 24 bytes = 72 bytes)
+        for i in 0..3 {
+            buf[pos..pos+4].copy_from_slice(&self.timers.counter(i).to_le_bytes()); pos += 4;
+            buf[pos..pos+4].copy_from_slice(&self.timers.reset_value(i).to_le_bytes()); pos += 4;
+            buf[pos..pos+4].copy_from_slice(&self.timers.match_val(i, 0).to_le_bytes()); pos += 4;
+            buf[pos..pos+4].copy_from_slice(&self.timers.match_val(i, 1).to_le_bytes()); pos += 4;
+            buf[pos..pos+4].copy_from_slice(&self.timers.accum_cycles(i).to_le_bytes()); pos += 4;
+            pos += 4; // Padding to 24 bytes
+        }
 
         // LCD controller (24 bytes)
         buf[pos..pos+4].copy_from_slice(&self.lcd.control().to_le_bytes()); pos += 4;
@@ -652,32 +586,15 @@ impl Peripherals {
         self.interrupt.set_inverted_word(0, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
         self.interrupt.set_inverted_word(1, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
 
-        // Timer 1
-        self.timer1.set_counter(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.timer1.set_reset_value(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.timer1.set_match1(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.timer1.set_match2(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.timer1.write_control(buf[pos]); pos += 1;
-        self.timer1.set_accum_cycles(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        pos += 3;
-
-        // Timer 2
-        self.timer2.set_counter(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.timer2.set_reset_value(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.timer2.set_match1(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.timer2.set_match2(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.timer2.write_control(buf[pos]); pos += 1;
-        self.timer2.set_accum_cycles(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        pos += 3;
-
-        // Timer 3
-        self.timer3.set_counter(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.timer3.set_reset_value(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.timer3.set_match1(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.timer3.set_match2(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.timer3.write_control(buf[pos]); pos += 1;
-        self.timer3.set_accum_cycles(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        pos += 3;
+        // Timers (3 × 24 bytes)
+        for i in 0..3 {
+            self.timers.set_counter(i, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+            self.timers.set_reset_value(i, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+            self.timers.set_match_val(i, 0, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+            self.timers.set_match_val(i, 1, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+            self.timers.set_accum_cycles(i, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+            pos += 4; // Padding
+        }
 
         // LCD controller
         self.lcd.set_control(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
@@ -749,18 +666,18 @@ mod tests {
         p.interrupt.raise(sources::TIMER1);
         // Enable interrupt via write
         p.write_test(INT_BASE + 0x04, sources::TIMER1 as u8);
-        p.timer1.write_control(0x01); // Enable timer 1
+        p.timers.write(0x30, 0x01); // Enable timer 0
         p.set_key(0, 0, true);
 
         assert!(p.irq_pending());
-        assert!(p.timer1.is_enabled());
+        assert!(p.timers.is_enabled(0));
         assert!(p.key_state()[0][0]);
 
         // Reset
         p.reset();
 
         assert!(!p.irq_pending());
-        assert!(!p.timer1.is_enabled());
+        assert!(!p.timers.is_enabled(0));
         assert!(!p.key_state()[0][0]);
     }
 
@@ -804,9 +721,9 @@ mod tests {
         assert_eq!(p.read_test(TIMER_BASE, &keys), 0x12);
         assert_eq!(p.read_test(TIMER_BASE + 1, &keys), 0x34);
 
-        // Write timer control
-        p.write_test(TIMER_BASE + 0x30, 0x01); // Enable timer 1
-        assert!(p.timer1.is_enabled());
+        // Write timer control (bit 0 = timer 0 enable)
+        p.write_test(TIMER_BASE + 0x30, 0x01);
+        assert!(p.timers.is_enabled(0));
     }
 
     #[test]
@@ -879,8 +796,10 @@ mod tests {
     fn test_tick_timer_interrupt() {
         let mut p = Peripherals::new();
 
-        // Enable timer 1 with interrupt on overflow
-        p.timer1.write_control(0x01 | 0x02 | 0x04); // ENABLE | COUNT_UP | INT_ON_ZERO
+        // New control format: bit 0=enable, bit 2=overflow enable (count up = not inverted)
+        p.write_test(TIMER_BASE + 0x30, 0x05); // Timer 0: enable + overflow
+        // Set timer mask to trigger on overflow (bit 2 = timer 0 overflow)
+        p.write_test(TIMER_BASE + 0x38, 0x04);
         // Set counter to max via write API
         p.write_test(TIMER_BASE, 0xFF);
         p.write_test(TIMER_BASE + 1, 0xFF);
@@ -938,42 +857,49 @@ mod tests {
     fn test_tick_multiple_timers() {
         let mut p = Peripherals::new();
 
-        // Enable all 3 timers counting up with interrupt
-        let ctrl = 0x01 | 0x02 | 0x04; // ENABLE | COUNT_UP | INT_ON_ZERO
+        // New control: enable all 3 timers (bits 0,3,6) + overflow enable (bits 2,5,8)
+        // All count up (not inverted)
+        let ctrl: u32 = 0x01 | 0x04   // Timer 0: enable + overflow
+                       | 0x08 | 0x20  // Timer 1: enable + overflow
+                       | 0x40 | 0x100; // Timer 2: enable + overflow
+        p.write_test(TIMER_BASE + 0x30, (ctrl & 0xFF) as u8);
+        p.write_test(TIMER_BASE + 0x31, ((ctrl >> 8) & 0xFF) as u8);
 
-        p.timer1.write_control(ctrl);
-        // Set counter to 0xFFFFFFFE via write API
+        // Set mask for all overflow bits (2, 5, 8)
+        let mask: u32 = 0x04 | 0x20 | 0x100;
+        p.write_test(TIMER_BASE + 0x38, (mask & 0xFF) as u8);
+        p.write_test(TIMER_BASE + 0x39, ((mask >> 8) & 0xFF) as u8);
+
+        // Set counter to 0xFFFFFFFE for timer 0
         p.write_test(TIMER_BASE, 0xFE);
         p.write_test(TIMER_BASE + 1, 0xFF);
         p.write_test(TIMER_BASE + 2, 0xFF);
         p.write_test(TIMER_BASE + 3, 0xFF);
 
-        p.timer2.write_control(ctrl);
-        // Set counter to 0xFFFFFFFD via write API
+        // Set counter to 0xFFFFFFFD for timer 1
         p.write_test(TIMER_BASE + 0x10, 0xFD);
         p.write_test(TIMER_BASE + 0x11, 0xFF);
         p.write_test(TIMER_BASE + 0x12, 0xFF);
         p.write_test(TIMER_BASE + 0x13, 0xFF);
 
-        p.timer3.write_control(ctrl);
-        // Set counter to 0xFFFFFFFC via write API
+        // Set counter to 0xFFFFFFFC for timer 2
         p.write_test(TIMER_BASE + 0x20, 0xFC);
         p.write_test(TIMER_BASE + 0x21, 0xFF);
         p.write_test(TIMER_BASE + 0x22, 0xFF);
         p.write_test(TIMER_BASE + 0x23, 0xFF);
 
-        // Enable all timer interrupts
+        // Enable all timer interrupts in interrupt controller
         let enabled = sources::TIMER1 | sources::TIMER2 | sources::TIMER3;
         p.write_test(INT_BASE + 0x04, enabled as u8);
 
-        // Tick 2 cycles - should overflow timer 1
+        // Tick 2 cycles - should overflow timer 0
         let pending = p.tick(2);
         assert!(pending);
 
-        // Tick 1 more - should overflow timer 2
+        // Tick 1 more - should overflow timer 1
         p.tick(1);
 
-        // Tick 1 more - should overflow timer 3
+        // Tick 1 more - should overflow timer 2
         p.tick(1);
 
         // All 3 timers should have raised interrupts
@@ -986,8 +912,9 @@ mod tests {
     fn test_tick_no_interrupts_when_disabled() {
         let mut p = Peripherals::new();
 
-        // Enable timer 1 with interrupt on overflow
-        p.timer1.write_control(0x01 | 0x02 | 0x04);
+        // Enable timer 0 with overflow in new control format
+        p.write_test(TIMER_BASE + 0x30, 0x05); // enable + overflow
+        p.write_test(TIMER_BASE + 0x38, 0x04); // mask overflow bit
         // Set counter to max
         p.write_test(TIMER_BASE, 0xFF);
         p.write_test(TIMER_BASE + 1, 0xFF);

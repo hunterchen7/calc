@@ -1417,19 +1417,21 @@ impl Emu {
 
     /// Snapshot a timer's internal state (1, 2, or 3)
     pub fn timer_snapshot(&self, which: usize) -> Option<TimerSnapshot> {
-        let timer = match which {
-            1 => &self.bus.ports.timer1,
-            2 => &self.bus.ports.timer2,
-            3 => &self.bus.ports.timer3,
+        let idx = match which {
+            1 => 0,
+            2 => 1,
+            3 => 2,
             _ => return None,
         };
+        let timers = &self.bus.ports.timers;
 
         Some(TimerSnapshot {
-            counter: timer.counter(),
-            reset_value: timer.reset_value(),
-            match1: timer.match1(),
-            match2: timer.match2(),
-            control: timer.control(),
+            counter: timers.counter(idx),
+            reset_value: timers.reset_value(idx),
+            match1: timers.match_val(idx, 0),
+            match2: timers.match_val(idx, 1),
+            control: ((timers.control_word() >> (idx * 3)) & 0x7) as u8
+                | if timers.control_word() & (1 << (9 + idx)) != 0 { 0x08 } else { 0 },
         })
     }
 

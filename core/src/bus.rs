@@ -1102,23 +1102,7 @@ impl Bus {
             0x7 => {
                 // Timers - mask with 0x7F
                 let offset = (port & 0x7F) as u32;
-                if offset >= 0x30 {
-                    match offset {
-                        0x30 => self.ports.timer1.read_control(),
-                        0x34 => self.ports.timer2.read_control(),
-                        0x38 => self.ports.timer3.read_control(),
-                        _ => 0x00,
-                    }
-                } else {
-                    let timer_idx = offset / 0x10;
-                    let reg_offset = offset % 0x10;
-                    match timer_idx {
-                        0 => self.ports.timer1.read(reg_offset),
-                        1 => self.ports.timer2.read(reg_offset),
-                        2 => self.ports.timer3.read(reg_offset),
-                        _ => 0x00,
-                    }
-                }
+                self.ports.timers.read(offset)
             }
             0x8 => {
                 // RTC - mask with 0xFF
@@ -1235,23 +1219,7 @@ impl Bus {
             0x7 => {
                 // Timers - mask with 0x7F
                 let offset = (port & 0x7F) as u32;
-                if offset >= 0x30 {
-                    match offset {
-                        0x30 => self.ports.timer1.write_control(value),
-                        0x34 => self.ports.timer2.write_control(value),
-                        0x38 => self.ports.timer3.write_control(value),
-                        _ => {}
-                    }
-                } else {
-                    let timer_idx = offset / 0x10;
-                    let reg_offset = offset % 0x10;
-                    match timer_idx {
-                        0 => self.ports.timer1.write(reg_offset, value),
-                        1 => self.ports.timer2.write(reg_offset, value),
-                        2 => self.ports.timer3.write(reg_offset, value),
-                        _ => {}
-                    }
-                }
+                self.ports.timers.write(offset, value);
             }
             0x8 => {
                 // RTC - mask with 0xFF
@@ -1347,23 +1315,7 @@ impl Bus {
             }
             0x7 => {
                 let offset = (port & 0x7F) as u32;
-                if offset >= 0x30 {
-                    match offset {
-                        0x30 => self.ports.timer1.read_control(),
-                        0x34 => self.ports.timer2.read_control(),
-                        0x38 => self.ports.timer3.read_control(),
-                        _ => 0x00,
-                    }
-                } else {
-                    let timer_idx = offset / 0x10;
-                    let reg_offset = offset % 0x10;
-                    match timer_idx {
-                        0 => self.ports.timer1.read(reg_offset),
-                        1 => self.ports.timer2.read(reg_offset),
-                        2 => self.ports.timer3.read(reg_offset),
-                        _ => 0x00,
-                    }
-                }
+                self.ports.timers.read(offset)
             }
             0x8 => {
                 // RTC - can't read without cycle parameter, return 0
