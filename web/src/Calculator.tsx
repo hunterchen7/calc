@@ -125,6 +125,12 @@ export function Calculator({
   const speedRef = useRef(1); // Ref for use in animation loop
   const storageRef = useRef<StateStorage | null>(null);
   const romHashRef = useRef<string | null>(null);
+  const backendTypeRef = useRef<BackendType>(defaultBackend);
+
+  // Keep backendTypeRef in sync
+  useEffect(() => {
+    backendTypeRef.current = backendType;
+  }, [backendType]);
 
   // Save state helper
   const saveState = useCallback(async () => {
@@ -137,8 +143,8 @@ export function Calculator({
     try {
       const stateData = backend.saveState();
       if (stateData) {
-        await storage.saveState(romHash, stateData);
-        console.log('[State] Saved state for ROM:', romHash);
+        await storage.saveState(romHash, stateData, backendTypeRef.current);
+        console.log('[State] Saved state for ROM:', romHash, 'backend:', backendTypeRef.current);
       }
     } catch (err) {
       console.error('[State] Failed to save state:', err);
@@ -201,10 +207,10 @@ export function Calculator({
 
           const result = await backend.loadRom(romDataRef.current);
           if (result === 0) {
-            // Try to load saved state
-            const savedState = await storage.loadState(romHash);
+            // Try to load saved state (namespaced by backend)
+            const savedState = await storage.loadState(romHash, backendType);
             if (savedState && backend.loadState(savedState)) {
-              console.log('[State] Restored state for ROM:', romHash);
+              console.log('[State] Restored state for ROM:', romHash, 'backend:', backendType);
             } else {
               backend.powerOn();
             }
@@ -227,10 +233,10 @@ export function Calculator({
 
               const result = await backend.loadRom(bundledData);
               if (result === 0) {
-                // Try to load saved state
-                const savedState = await storage.loadState(romHash);
+                // Try to load saved state (namespaced by backend)
+                const savedState = await storage.loadState(romHash, backendType);
                 if (savedState && backend.loadState(savedState)) {
-                  console.log('[State] Restored state for ROM:', romHash);
+                  console.log('[State] Restored state for ROM:', romHash, 'backend:', backendType);
                 } else {
                   backend.powerOn();
                 }
@@ -313,10 +319,10 @@ export function Calculator({
       if (result === 0) {
         console.log("ROM loaded successfully");
 
-        // Try to load saved state
-        const savedState = await storage.loadState(romHash);
+        // Try to load saved state (namespaced by backend)
+        const savedState = await storage.loadState(romHash, backendTypeRef.current);
         if (savedState && backend.loadState(savedState)) {
-          console.log('[State] Restored state for ROM:', romHash);
+          console.log('[State] Restored state for ROM:', romHash, 'backend:', backendTypeRef.current);
         } else {
           console.log("No saved state, calling power_on...");
           backend.powerOn();
