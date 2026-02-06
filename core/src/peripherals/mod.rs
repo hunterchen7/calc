@@ -940,7 +940,7 @@ mod tests {
         // Flash controller is at 0xE10000, offset 0x010000 from 0xE00000
         // CEmu default state: flash is enabled
         assert_eq!(p.read_test(FLASH_BASE + 0x00, &keys), 0x01); // enable
-        assert_eq!(p.read_test(FLASH_BASE + 0x01, &keys), 0x07); // size config
+        assert_eq!(p.read_test(FLASH_BASE + 0x01, &keys), 0x00); // size config (CEmu memsets to 0)
         assert_eq!(p.read_test(FLASH_BASE + 0x02, &keys), 0x06); // CEmu defaults to 0x06
         assert_eq!(p.read_test(FLASH_BASE + 0x05, &keys), 0x04); // CEmu defaults to 0x04
         assert_eq!(p.read_test(FLASH_BASE + 0x08, &keys), 0x00); // control

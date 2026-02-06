@@ -675,10 +675,12 @@ impl Emu {
         while let Some(event) = self.scheduler.next_pending_event() {
             match event {
                 EventId::Rtc => {
-                    // Process RTC event (LATCH or load tick)
-                    // The RTC maintains a continuous 1-second cycle like CEmu
-                    use crate::scheduler::TICKS_PER_SECOND;
-                    let next_delay = self.bus.ports.rtc.process_event(TICKS_PER_SECOND, LATCH_TICK_OFFSET);
+                    // Process RTC event using 3-state machine (TICK/LATCH/LOAD_LATCH)
+                    let (next_delay, raise_interrupt) = self.bus.ports.rtc.process_event();
+                    if raise_interrupt {
+                        // TODO: Wire RTC interrupt to interrupt controller
+                        // CEmu: intrpt_set(INT_RTC, true) — INT_RTC is a dedicated line
+                    }
                     // Schedule next RTC event
                     self.scheduler.repeat(EventId::Rtc, next_delay);
                 }

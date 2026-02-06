@@ -249,11 +249,10 @@ impl ControlPorts {
                 // For now we skip the FSM to ensure boot completes
             }
             regs::CPU_SPEED => {
-                // Update cpu_speed value. Don't update prev_clock_mhz here!
-                // prev_clock_mhz tracks the SCHEDULER's actual rate, not the cpu_speed register.
-                // It's initialized to 48MHz (scheduler default) and updated in cpu_speed_changed()
-                // AFTER conversion happens.
-                self.cpu_speed = value & 0x03;
+                // CEmu: control.ports[index] = byte & 19 (0x13)
+                // Bits [1:0] = CPU speed, bit 4 = additional flag
+                // Store full masked value; cpu_speed() extracts bits [1:0]
+                self.cpu_speed = value & 0x13;
                 // CEmu calls set_cpu_clock() on EVERY write to port 0x01,
                 // which triggers cycle conversion
                 self.cpu_speed_written = true;
@@ -319,7 +318,7 @@ impl ControlPorts {
                 // Bit 3 (flash ready) can only be cleared by this, never set
                 self.flash_unlock = (self.flash_unlock | 5) & value;
             }
-            regs::GENERAL => self.general = value,
+            regs::GENERAL => self.general = value & 0x01, // CEmu: byte & 1
             // Privileged boundary (3 bytes at 0x1D-0x1F)
             0x1D => self.privileged = (self.privileged & 0xFFFF00) | (value as u32),
             0x1E => self.privileged = (self.privileged & 0xFF00FF) | ((value as u32) << 8),
@@ -344,9 +343,10 @@ impl ControlPorts {
         }
     }
 
-    /// Get current CPU speed setting
+    /// Get current CPU speed setting (0=6MHz, 1=12MHz, 2=24MHz, 3=48MHz)
+    /// Returns only bits [1:0] of the port value
     pub fn cpu_speed(&self) -> u8 {
-        self.cpu_speed
+        self.cpu_speed & 0x03
     }
 
     /// Check if CPU_SPEED port was written since last check, and reset the flag.
@@ -371,12 +371,11 @@ impl ControlPorts {
 
     /// Get current CPU clock rate in MHz based on speed setting
     pub fn clock_rate_mhz(&self) -> u32 {
-        match self.cpu_speed {
+        match self.cpu_speed() {
             0 => 6,
             1 => 12,
             2 => 24,
-            3 => 48,
-            _ => 48, // Default to 48MHz for invalid values
+            _ => 48,
         }
     }
 
