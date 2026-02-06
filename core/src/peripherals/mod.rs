@@ -46,7 +46,7 @@ const SHA256_END: u32 = 0x020100;
 const CONTROL_ALT_BASE: u32 = 0x1F0000; // 0xFF0000 (accessed via OUT0/IN0)
 const CONTROL_ALT_END: u32 = 0x1F0100;
 const LCD_BASE: u32 = 0x030000; // 0xE30000
-const LCD_END: u32 = 0x030100;
+const LCD_END: u32 = 0x031000; // 0xE31000 — includes palette (0x200-0x3FF) and periph ID (0xFE0)
 const INT_BASE: u32 = 0x100000; // 0xF00000
 const INT_END: u32 = 0x100020;
 const TIMER_BASE: u32 = 0x120000; // 0xF20000
@@ -797,9 +797,9 @@ mod tests {
         let mut p = Peripherals::new();
 
         // Enable LCD with VBLANK interrupt via write API
-        // Control is at offset 0x18, INT_MASK is at offset 0x1C
+        // Control is at offset 0x18, IMSC is at offset 0x1C
         p.write_test(LCD_BASE + 0x18, 0x01); // ENABLE (control bit 0)
-        p.write_test(LCD_BASE + 0x1C, 0x01); // Enable VBLANK interrupt mask
+        p.write_test(LCD_BASE + 0x1C, 0x08); // Enable vert comp interrupt (bit 3, bit 0 reserved)
 
         // Enable LCD interrupt in interrupt controller (bit 11 - in byte 1)
         p.write_test(INT_BASE + 0x04, 0x00); // Low byte

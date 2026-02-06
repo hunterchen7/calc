@@ -274,7 +274,6 @@ pub struct LcdSnapshot {
     pub int_status: u32,
     pub upbase: u32,
     pub lpbase: u32,
-    pub palbase: u32,
     pub frame_cycles: u32,
 }
 
@@ -1447,7 +1446,6 @@ impl Emu {
             int_status: lcd.int_status(),
             upbase: lcd.upbase(),
             lpbase: lcd.lpbase(),
-            palbase: lcd.palbase(),
             frame_cycles: lcd.frame_cycles(),
         }
     }
