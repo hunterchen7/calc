@@ -62,6 +62,13 @@ pub struct GeneralTimers {
     mask: u32,
     /// Accumulated cycles per timer (for clock division / scheduling)
     accum_cycles: [u32; 3],
+    // TODO: Timer 2-cycle interrupt delay pipeline (Phase 4F)
+    // CEmu uses gpt.delayStatus/gpt.delayIntrpt with SCHED_TIMER_DELAY
+    // to defer status/interrupt by 2 CPU cycles. This requires scheduler
+    // integration. For now, interrupts fire immediately on match/overflow.
+    // Fields reserved for future implementation:
+    _delay_status: u32,
+    _delay_intrpt: u8,
 }
 
 /// Revision constant
@@ -75,6 +82,8 @@ impl GeneralTimers {
             status: 0,
             mask: 0,
             accum_cycles: [0; 3],
+            _delay_status: 0,
+            _delay_intrpt: 0,
         }
     }
 
@@ -86,12 +95,20 @@ impl GeneralTimers {
         self.status = 0;
         self.mask = 0;
         self.accum_cycles = [0; 3];
+        self._delay_status = 0;
+        self._delay_intrpt = 0;
     }
 
     /// Check if a specific timer is enabled
     /// CEmu: control bit [i*3] is enable
     pub fn is_enabled(&self, index: usize) -> bool {
         self.control & (1 << (index * 3)) != 0
+    }
+
+    /// Check if 32kHz clock source is selected for timer
+    /// CEmu: control bit [i*3+1] selects CLOCK_32K vs CLOCK_CPU
+    fn uses_32k_clock(&self, index: usize) -> bool {
+        self.control & (1 << (index * 3 + 1)) != 0
     }
 
     /// Check if count direction is inverted (down) for timer
@@ -173,8 +190,9 @@ impl GeneralTimers {
     }
 
     /// Tick all timers with given CPU cycles
+    /// cpu_speed: current CPU speed setting (0=6MHz, 1=12MHz, 2=24MHz, 3=48MHz)
     /// Returns a bitmask of which timer interrupts fired (bit 0=timer0, 1=timer1, 2=timer2)
-    pub fn tick(&mut self, cycles: u32) -> u8 {
+    pub fn tick(&mut self, cycles: u32, cpu_speed: u8) -> u8 {
         let mut fired: u8 = 0;
 
         for i in 0..3 {
@@ -182,11 +200,32 @@ impl GeneralTimers {
                 continue;
             }
 
-            // TODO: Phase 4 will add 32kHz clock source support (control bit i*3+1)
-            // For now, always use CPU clock
             self.accum_cycles[i] += cycles;
-            let ticks = self.accum_cycles[i];
-            self.accum_cycles[i] = 0;
+
+            // Determine effective ticks based on clock source
+            let ticks = if self.uses_32k_clock(i) {
+                // 32kHz clock: convert CPU cycles to 32kHz ticks
+                // cpu_cycles_per_32k_tick = cpu_rate / 32768
+                let cpu_rate: u32 = match cpu_speed {
+                    0 => 6_000_000,
+                    1 => 12_000_000,
+                    2 => 24_000_000,
+                    _ => 48_000_000,
+                };
+                let cycles_per_tick = cpu_rate / 32_768;
+                if self.accum_cycles[i] >= cycles_per_tick {
+                    let t = self.accum_cycles[i] / cycles_per_tick;
+                    self.accum_cycles[i] %= cycles_per_tick;
+                    t
+                } else {
+                    continue;
+                }
+            } else {
+                // CPU clock: 1 CPU cycle = 1 timer tick
+                let t = self.accum_cycles[i];
+                self.accum_cycles[i] = 0;
+                t
+            };
 
             if ticks == 0 {
                 continue;
@@ -422,7 +461,7 @@ mod tests {
         gpt.control = 0x01; // enable timer 0
         gpt.timer[0].counter = 0;
 
-        let fired = gpt.tick(100);
+        let fired = gpt.tick(100, 3);
         assert_eq!(fired, 0); // No interrupts
         assert_eq!(gpt.timer[0].counter, 100);
     }
@@ -434,7 +473,7 @@ mod tests {
         gpt.control = 0x01 | (1 << 9); // enable + direction invert
         gpt.timer[0].counter = 100;
 
-        let fired = gpt.tick(50);
+        let fired = gpt.tick(50, 3);
         assert_eq!(fired, 0);
         assert_eq!(gpt.timer[0].counter, 50);
     }
@@ -447,7 +486,7 @@ mod tests {
         gpt.timer[0].counter = 0xFFFFFFFE;
         gpt.mask = 0x04; // Mask timer 0 overflow bit
 
-        let fired = gpt.tick(3);
+        let fired = gpt.tick(3, 3);
         // Should have overflowed
         assert_ne!(gpt.status & 0x04, 0); // Overflow bit set
         assert_ne!(fired, 0); // Interrupt fired
@@ -461,7 +500,7 @@ mod tests {
         gpt.timer[0].counter = 5;
         gpt.timer[0].reset = 1000;
 
-        gpt.tick(10);
+        gpt.tick(10, 3);
         // 5 ticks to reach 0, reload to 1000, 5 more ticks down
         assert_eq!(gpt.timer[0].counter, 995);
     }
@@ -472,7 +511,7 @@ mod tests {
         gpt.timer[0].counter = 100;
         // Timer 0 not enabled
 
-        let fired = gpt.tick(50);
+        let fired = gpt.tick(50, 3);
         assert_eq!(fired, 0);
         assert_eq!(gpt.timer[0].counter, 100);
     }
@@ -486,7 +525,7 @@ mod tests {
         gpt.timer[0].match_val[0] = 50;
         gpt.mask = 0x01; // Mask match0 for timer 0
 
-        let fired = gpt.tick(60);
+        let fired = gpt.tick(60, 3);
         assert_ne!(gpt.status & 0x01, 0); // Match0 bit set
         assert_ne!(fired, 0);
     }

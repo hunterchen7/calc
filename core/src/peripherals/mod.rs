@@ -333,8 +333,9 @@ impl Peripherals {
     /// Tick all peripherals
     /// Returns true if any interrupt is pending
     pub fn tick(&mut self, cycles: u32) -> bool {
-        // Tick timers
-        let timer_fired = self.timers.tick(cycles);
+        // Tick timers (pass CPU speed for 32kHz clock source support)
+        let cpu_speed = self.control.cpu_speed();
+        let timer_fired = self.timers.tick(cycles, cpu_speed);
         if timer_fired & 0x01 != 0 {
             self.interrupt.raise(sources::TIMER1);
         }
@@ -368,6 +369,11 @@ impl Peripherals {
 
     /// Tick the OS Timer (32KHz crystal timer, generates bit 4 interrupt)
     /// Based on CEmu's ost_event in timers.c
+    ///
+    /// CEmu order (from timers.c ost_event):
+    ///   1. intrpt_set(INT_OSTIMER, gpt.osTimerState)  — set interrupt to OLD state
+    ///   2. sched_repeat(id, ...)                       — reschedule
+    ///   3. gpt.osTimerState = !gpt.osTimerState        — toggle state
     fn tick_os_timer(&mut self, cycles: u32) {
         // Get CPU speed from control port (bits 0-1)
         let speed = (self.control.read(0x01) & 0x03) as usize;
@@ -385,19 +391,7 @@ impl Peripherals {
 
         self.os_timer_cycles += cycles as u64;
 
-        // Debug: OS Timer state tracking
-        static mut OS_TIMER_DEBUG_COUNT: u64 = 0;
-        #[allow(static_mut_refs)]
-        unsafe {
-            OS_TIMER_DEBUG_COUNT += 1;
-            if OS_TIMER_DEBUG_COUNT % 5000000 == 1 {
-                eprintln!("OS_TIMER_TICK: count={}, os_timer_cycles={}, state={}, cycles_per_32k_tick={}",
-                         OS_TIMER_DEBUG_COUNT, self.os_timer_cycles, self.os_timer_state, cycles_per_32k_tick);
-            }
-        }
-
         // Check if enough cycles have passed to toggle state
-        // cycles_needed must be recalculated each iteration since it depends on os_timer_state
         loop {
             // OS Timer interval in 32K ticks depends on state:
             // - When state is false: wait ost_ticks[speed] ticks
@@ -415,35 +409,18 @@ impl Peripherals {
 
             self.os_timer_cycles -= cycles_needed;
 
-            // CEmu order: toggle FIRST, then set interrupt to match NEW state
-            // From timers.c ost_event():
-            //   gpt.osTimerState = !gpt.osTimerState;
-            //   intrpt_set(INT_OSTIMER, gpt.osTimerState);
-            self.os_timer_state = !self.os_timer_state;
-
-            // Set interrupt based on NEW state
-            // IMPORTANT: Only RAISE the interrupt on the rising edge.
-            // Do NOT clear_raw when state becomes false - the status should
-            // persist until software acknowledges it via the interrupt controller.
-            //
-            // The issue with calling clear_raw: For non-latched interrupts,
-            // clear_raw also clears the status bit. The OS Timer only stays
-            // in the "true" state for ~1464 cycles at 48MHz, which is too short
-            // for the CPU to reliably process the interrupt before it's cleared.
-            //
-            // By only raising and letting software acknowledge, the interrupt
-            // remains pending until the ISR processes it.
+            // CEmu order: set interrupt to OLD state FIRST, then toggle
+            // intrpt_set(INT_OSTIMER, gpt.osTimerState) with old state
             if self.os_timer_state {
                 self.interrupt.raise(sources::OSTIMER);
+            } else {
+                self.interrupt.clear_raw(sources::OSTIMER);
             }
-            // Note: We intentionally do NOT call clear_raw(OSTIMER) when state
-            // becomes false. The raw state tracks the physical timer state,
-            // but the interrupt status should remain until acknowledged.
 
-            // IMPORTANT: Only process one state change per tick() call!
-            // This matches CEmu's scheduler-based approach where each timer event
-            // is processed separately, giving the CPU a chance to handle interrupts
-            // before the next state change clears them.
+            // Toggle state AFTER setting interrupt
+            self.os_timer_state = !self.os_timer_state;
+
+            // Only process one state change per tick() call
             break;
         }
     }
