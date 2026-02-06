@@ -90,15 +90,23 @@ export class StateStorage {
   }
 
   /**
-   * Save emulator state for a given ROM.
+   * Build a state storage key namespaced by backend type.
+   * This ensures CEmu and Rust backends don't overwrite each other's states.
    */
-  async saveState(romHash: string, stateData: Uint8Array): Promise<void> {
+  private stateKey(romHash: string, backend?: string): string {
+    return backend ? `${backend}:${romHash}` : romHash;
+  }
+
+  /**
+   * Save emulator state for a given ROM and backend.
+   */
+  async saveState(romHash: string, stateData: Uint8Array, backend?: string): Promise<void> {
     if (!this.db) throw new Error("Storage not initialized");
 
     return new Promise((resolve, reject) => {
       const transaction = this.db!.transaction([STORE_STATES], "readwrite");
       const store = transaction.objectStore(STORE_STATES);
-      const request = store.put(stateData, romHash);
+      const request = store.put(stateData, this.stateKey(romHash, backend));
 
       request.onerror = () => reject(request.error);
       request.onsuccess = () => resolve();
@@ -106,15 +114,15 @@ export class StateStorage {
   }
 
   /**
-   * Load emulator state for a given ROM.
+   * Load emulator state for a given ROM and backend.
    */
-  async loadState(romHash: string): Promise<Uint8Array | null> {
+  async loadState(romHash: string, backend?: string): Promise<Uint8Array | null> {
     if (!this.db) throw new Error("Storage not initialized");
 
     return new Promise((resolve, reject) => {
       const transaction = this.db!.transaction([STORE_STATES], "readonly");
       const store = transaction.objectStore(STORE_STATES);
-      const request = store.get(romHash);
+      const request = store.get(this.stateKey(romHash, backend));
 
       request.onerror = () => reject(request.error);
       request.onsuccess = () => {
@@ -131,15 +139,15 @@ export class StateStorage {
   }
 
   /**
-   * Delete saved state for a given ROM.
+   * Delete saved state for a given ROM and backend.
    */
-  async deleteState(romHash: string): Promise<void> {
+  async deleteState(romHash: string, backend?: string): Promise<void> {
     if (!this.db) throw new Error("Storage not initialized");
 
     return new Promise((resolve, reject) => {
       const transaction = this.db!.transaction([STORE_STATES], "readwrite");
       const store = transaction.objectStore(STORE_STATES);
-      const request = store.delete(romHash);
+      const request = store.delete(this.stateKey(romHash, backend));
 
       request.onerror = () => reject(request.error);
       request.onsuccess = () => resolve();
@@ -147,15 +155,15 @@ export class StateStorage {
   }
 
   /**
-   * Check if a saved state exists for a given ROM.
+   * Check if a saved state exists for a given ROM and backend.
    */
-  async hasState(romHash: string): Promise<boolean> {
+  async hasState(romHash: string, backend?: string): Promise<boolean> {
     if (!this.db) throw new Error("Storage not initialized");
 
     return new Promise((resolve, reject) => {
       const transaction = this.db!.transaction([STORE_STATES], "readonly");
       const store = transaction.objectStore(STORE_STATES);
-      const request = store.count(romHash);
+      const request = store.count(this.stateKey(romHash, backend));
 
       request.onerror = () => reject(request.error);
       request.onsuccess = () => resolve(request.result > 0);
