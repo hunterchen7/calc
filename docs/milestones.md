@@ -98,16 +98,16 @@
 
 ---
 
-## Phase 7: CPU Advanced & Bus Protection — [partial]
+## Phase 7: CPU Advanced & Bus Protection — [x]
 **Effort: XL | Risk: High**
 
 - [x] **7A** Separate SPS/SPL (`cpu/mod.rs`, `cpu/helpers.rs`) — replace single `sp` with `sps`+`spl`, `sp()`/`set_sp()` select by L mode
 - [x] **7B** Mixed-mode CALL/RET/RST — push/pop MADL|ADL flag byte, push_byte_mode/pop_byte_mode helpers, suffix flag propagation
 - [x] **7C** Memory protection (`bus.rs`, `peripherals/control.rs`) — stack limit NMI, protected range check, flash privilege check, ports 0x3D/0x3E
-- [ ] **7D** DMA scheduling — deferred (DMA events steal CPU cycles)
+- [x] **7D** DMA scheduling — LCD DMA steals CPU cycles via `dma_last_mem_timestamp` tracking, `process_dma_stealing()` at instruction boundaries, ~7.7% cycle overhead from bus contention
 - [x] **7E** CPU cycle parity — HALT fast-forwards to next event, interrupt prefetch_discard + L/IL setup, R register rotation, LD A,I PV=IFF1
 
-**Verify**: Boot passes (156.10M cycles, PC=085B80). 272/457 tests pass (178 pre-existing failures). 7D deferred.
+**Verify**: Boot passes (168.14M cycles, PC=085B80). 277/455 tests pass (178 pre-existing failures).
 
 ---
 
@@ -121,6 +121,6 @@
 | 4 | Scheduler & Timing | **Done** | — |
 | 5 | RTC/SHA256/Control | **Done** | — |
 | 6 | LCD & SPI | **Done** | — |
-| 7 | CPU Advanced & Bus | Partial | 7D (DMA scheduling) |
+| 7 | CPU Advanced & Bus | **Done** | — |
 
-Boot passes at PC=085B80 with 156.10M cycles. 277/455 tests pass (178 pre-existing failures). Remaining deferred: 7D (DMA scheduling).
+All 7 phases complete. Boot passes at PC=085B80 with 168.14M cycles. 277/455 tests pass (178 pre-existing failures). No remaining deferred items.

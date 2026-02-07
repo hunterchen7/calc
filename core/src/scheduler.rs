@@ -140,6 +140,10 @@ pub struct Scheduler {
     cached_cpu_base_ticks: u64,
     /// Cached earliest event timestamp (avoids scanning all events on every call)
     next_event_ticks: u64,
+    /// DMA state: timestamp of last memory operation completion (base ticks)
+    /// Used by process_pending_dma to track bus contention with LCD DMA.
+    /// CEmu: sched.dma.last_mem_timestamp
+    pub dma_last_mem_timestamp: u64,
 }
 
 impl Scheduler {
@@ -161,6 +165,7 @@ impl Scheduler {
             cpu_speed: 0, // Default 6 MHz
             cached_cpu_base_ticks: ClockId::Cpu.base_ticks_per_tick(0),
             next_event_ticks: u64::MAX,
+            dma_last_mem_timestamp: 0,
         }
     }
 
@@ -178,6 +183,7 @@ impl Scheduler {
         self.cpu_speed = 0;
         self.cached_cpu_base_ticks = ClockId::Cpu.base_ticks_per_tick(0);
         self.next_event_ticks = u64::MAX;
+        self.dma_last_mem_timestamp = 0;
     }
 
     /// Update CPU speed setting
@@ -258,6 +264,9 @@ impl Scheduler {
                 item.timestamp = item.timestamp.saturating_sub(SCHED_BASE_CLOCK_RATE);
             }
         }
+
+        // Also adjust DMA timestamp (CEmu: sched_process_pending_dma(0) in sched_second)
+        self.dma_last_mem_timestamp = self.dma_last_mem_timestamp.saturating_sub(SCHED_BASE_CLOCK_RATE);
 
         self.recalc_next_event();
     }
@@ -383,6 +392,24 @@ impl Scheduler {
         events.into_iter().map(|(e, _)| e).collect()
     }
 
+    /// Get the raw timestamp for a DMA event (for process_pending_dma).
+    /// Returns None if event is not active.
+    pub fn dma_event_timestamp(&self, event: EventId) -> Option<u64> {
+        let item = &self.items[event as usize];
+        if item.is_active() {
+            Some(item.timestamp & !INACTIVE_FLAG)
+        } else {
+            None
+        }
+    }
+
+    /// Convert base ticks to CPU cycles (ceiling division).
+    /// Used by DMA cycle stealing to calculate how many CPU cycles correspond
+    /// to a base tick timestamp.
+    pub fn base_ticks_to_cpu_cycles_ceil(&self, base_ticks: u64) -> u64 {
+        (base_ticks + self.cached_cpu_base_ticks - 1) / self.cached_cpu_base_ticks
+    }
+
     /// Get the number of CPU cycles until the nearest active event fires.
     /// Returns 0 if any event has already fired or no events are active.
     /// Used by the emu loop to fast-forward HALT to the next event (matching CEmu's cpu_halt).
@@ -440,8 +467,8 @@ impl Scheduler {
 
 impl Scheduler {
     /// Size of scheduler state snapshot in bytes
-    /// 8 (base_ticks) + 1 (cpu_speed) + 9*8 (item timestamps) = 81 bytes, round to 88
-    pub const SNAPSHOT_SIZE: usize = 88;
+    /// 8 (base_ticks) + 1 (cpu_speed) + 9*8 (item timestamps) + 8 (dma_last_mem_timestamp) = 89, round to 96
+    pub const SNAPSHOT_SIZE: usize = 96;
 
     /// Save scheduler state to bytes
     pub fn to_bytes(&self) -> [u8; Self::SNAPSHOT_SIZE] {
@@ -452,11 +479,14 @@ impl Scheduler {
         buf[pos..pos+8].copy_from_slice(&self.base_ticks.to_le_bytes()); pos += 8;
         buf[pos] = self.cpu_speed; pos += 1;
 
-        // Event timestamps (7 events × 8 bytes each)
+        // Event timestamps (9 events × 8 bytes each)
         for item in &self.items {
             buf[pos..pos+8].copy_from_slice(&item.timestamp.to_le_bytes());
             pos += 8;
         }
+
+        // DMA state
+        buf[pos..pos+8].copy_from_slice(&self.dma_last_mem_timestamp.to_le_bytes());
 
         buf
     }
@@ -478,6 +508,9 @@ impl Scheduler {
             item.timestamp = u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap());
             pos += 8;
         }
+
+        // DMA state
+        self.dma_last_mem_timestamp = u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap());
 
         self.recalc_next_event();
         Ok(())

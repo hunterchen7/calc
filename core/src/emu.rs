@@ -476,6 +476,12 @@ impl Emu {
             // Process pending scheduler events
             self.process_scheduler_events();
 
+            // DMA cycle stealing: if LCD DMA consumed bus time, steal CPU cycles
+            let dma_stolen = self.process_dma_stealing();
+            if dma_stolen > 0 {
+                cycles_remaining -= dma_stolen as i32;
+            }
+
             // Check if SPI needs initial scheduling (state changed via port write)
             if self.bus.take_spi_schedule_flag() && !self.scheduler.is_active(EventId::Spi) {
                 if let Some(ticks) = self.bus.spi().try_start_transfer_for_scheduler() {
@@ -556,6 +562,12 @@ impl Emu {
 
             self.total_cycles = self.bus.total_cycles();
             self.process_scheduler_events();
+
+            // DMA cycle stealing
+            let dma_stolen = self.process_dma_stealing();
+            if dma_stolen > 0 {
+                cycles_remaining -= dma_stolen as i32;
+            }
 
             // Check if SPI needs initial scheduling (state changed via port write)
             if self.bus.take_spi_schedule_flag() && !self.scheduler.is_active(EventId::Spi) {
@@ -668,6 +680,9 @@ impl Emu {
 
         // Process pending scheduler events
         self.process_scheduler_events();
+
+        // DMA cycle stealing
+        self.process_dma_stealing();
 
         // Check if SPI needs initial scheduling (state changed via port write)
         if self.bus.take_spi_schedule_flag() && !self.scheduler.is_active(EventId::Spi) {
@@ -858,9 +873,14 @@ impl Emu {
                     self.scheduler.repeat(EventId::Lcd, result.duration);
                 }
                 EventId::LcdDma => {
-                    // LCD DMA — reads VRAM and advances UPCURR
+                    // LCD DMA — reads VRAM and advances UPCURR.
+                    // DMA consumes bus time tracked via dma_last_mem_timestamp.
+                    // CEmu: last_mem_timestamp += callback.dma(id) * tick_unit
                     let result = self.bus.ports.lcd.process_dma();
+                    let tick_unit = crate::scheduler::ClockId::Clock48M
+                        .base_ticks_per_tick(self.scheduler.cpu_speed());
                     if let Some(ticks) = result.repeat_ticks {
+                        self.scheduler.dma_last_mem_timestamp += ticks * tick_unit;
                         self.scheduler.repeat(EventId::LcdDma, ticks);
                     } else if let Some(offset) = result.schedule_relative {
                         // Schedule relative to LCD event
@@ -877,6 +897,43 @@ impl Emu {
                 }
             }
         }
+    }
+
+    /// Process DMA cycle stealing.
+    ///
+    /// CEmu's `sched_process_pending_dma()` checks if DMA has consumed bus time
+    /// ahead of the CPU. If so, CPU cycles are "stolen" by advancing the cycle
+    /// counter. This is called after `process_scheduler_events()` at instruction
+    /// boundaries.
+    ///
+    /// Returns the number of CPU cycles stolen by DMA.
+    fn process_dma_stealing(&mut self) -> u64 {
+        // Sync DMA timestamp to CPU time if behind (CEmu initializes to cpu_timestamp)
+        if self.scheduler.dma_last_mem_timestamp < self.scheduler.base_ticks {
+            self.scheduler.dma_last_mem_timestamp = self.scheduler.base_ticks;
+        }
+
+        let stolen = if self.scheduler.dma_last_mem_timestamp > self.scheduler.base_ticks {
+            // DMA is ahead of CPU — steal cycles
+            // CEmu: cpu.dmaCycles += div_ceil(last_mem_timestamp, cpu_clock) - cpu.cycles
+            let ahead_base_ticks =
+                self.scheduler.dma_last_mem_timestamp - self.scheduler.base_ticks;
+            let stolen_cycles =
+                self.scheduler.base_ticks_to_cpu_cycles_ceil(ahead_base_ticks);
+            if stolen_cycles > 0 {
+                self.scheduler.advance(stolen_cycles);
+                self.bus.add_cycles(stolen_cycles);
+                self.total_cycles = self.bus.total_cycles();
+            }
+            stolen_cycles
+        } else {
+            0
+        };
+
+        // Reset DMA timestamp to current CPU time (CEmu: last_mem = cpu_timestamp after access)
+        self.scheduler.dma_last_mem_timestamp = self.scheduler.base_ticks;
+
+        stolen
     }
 
     /// Peek at opcode bytes at address without affecting state
@@ -1094,8 +1151,8 @@ impl Emu {
 
     // ========== State Persistence ==========
 
-    /// State format version (v6: LCD DMA engine, scheduler grew from 80→88 bytes for LcdDma event)
-    const STATE_VERSION: u32 = 6;
+    /// State format version (v7: DMA scheduling, scheduler grew from 88→96 bytes for DMA state)
+    const STATE_VERSION: u32 = 7;
     /// Magic bytes for state file identification
     const STATE_MAGIC: [u8; 4] = *b"CE84";
     /// Header size: magic(4) + version(4) + rom_hash(8) + data_len(4) = 20
