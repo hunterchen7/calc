@@ -74,18 +74,20 @@ pub enum EventId {
     Rtc = 0,
     /// SPI transfer completion
     Spi = 1,
+    /// Timer 2-cycle interrupt delay pipeline (CEmu: SCHED_TIMER_DELAY)
+    TimerDelay = 2,
     /// Timer 0
-    Timer0 = 2,
+    Timer0 = 3,
     /// Timer 1
-    Timer1 = 3,
+    Timer1 = 4,
     /// Timer 2
-    Timer2 = 4,
+    Timer2 = 5,
     /// OS Timer
-    OsTimer = 5,
+    OsTimer = 6,
     /// LCD refresh
-    Lcd = 6,
+    Lcd = 7,
     /// Number of event types
-    Count = 7,
+    Count = 8,
 }
 
 /// Bit 63 set indicates event is inactive
@@ -145,6 +147,7 @@ impl Scheduler {
             items: [
                 SchedItem::new(EventId::Rtc, ClockId::Clock32K),
                 SchedItem::new(EventId::Spi, ClockId::Clock24M),
+                SchedItem::new(EventId::TimerDelay, ClockId::Cpu),
                 SchedItem::new(EventId::Timer0, ClockId::Cpu),
                 SchedItem::new(EventId::Timer1, ClockId::Cpu),
                 SchedItem::new(EventId::Timer2, ClockId::Cpu),
@@ -418,8 +421,8 @@ impl Scheduler {
 
 impl Scheduler {
     /// Size of scheduler state snapshot in bytes
-    /// 8 (base_ticks) + 1 (cpu_speed) + 7*8 (item timestamps) = 65 bytes, round to 72
-    pub const SNAPSHOT_SIZE: usize = 72;
+    /// 8 (base_ticks) + 1 (cpu_speed) + 8*8 (item timestamps) = 73 bytes, round to 80
+    pub const SNAPSHOT_SIZE: usize = 80;
 
     /// Save scheduler state to bytes
     pub fn to_bytes(&self) -> [u8; Self::SNAPSHOT_SIZE] {

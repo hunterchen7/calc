@@ -52,7 +52,7 @@ const INT_END: u32 = 0x100020;
 const TIMER_BASE: u32 = 0x120000; // 0xF20000
 const TIMER_END: u32 = 0x120040;
 const KEYPAD_BASE: u32 = 0x150000; // 0xF50000
-const KEYPAD_END: u32 = 0x150040;
+const KEYPAD_END: u32 = 0x150048; // Covers up to GPIO status (index 0x11)
 const WATCHDOG_BASE: u32 = 0x160000; // 0xF60000
 const WATCHDOG_END: u32 = 0x160100;
 const RTC_BASE: u32 = 0x180000; // 0xF80000
@@ -305,20 +305,16 @@ impl Peripherals {
     }
 
     /// Tick all peripherals
+    /// delay_remaining: CPU cycles remaining until the TimerDelay event fires (0 if not active)
     /// Returns true if any interrupt is pending
-    pub fn tick(&mut self, cycles: u32) -> bool {
+    pub fn tick(&mut self, cycles: u32, delay_remaining: u64) -> bool {
         // Tick timers (pass CPU speed for 32kHz clock source support)
+        // Timer interrupts are deferred through the 2-cycle delay pipeline.
+        // The caller (emu.rs) checks timers.needs_delay_event and schedules
+        // EventId::TimerDelay, which calls process_delay() to apply status
+        // and raise interrupts.
         let cpu_speed = self.control.cpu_speed();
-        let timer_fired = self.timers.tick(cycles, cpu_speed);
-        if timer_fired & 0x01 != 0 {
-            self.interrupt.raise(sources::TIMER1);
-        }
-        if timer_fired & 0x02 != 0 {
-            self.interrupt.raise(sources::TIMER2);
-        }
-        if timer_fired & 0x04 != 0 {
-            self.interrupt.raise(sources::TIMER3);
-        }
+        self.timers.tick(cycles, cpu_speed, delay_remaining);
 
         // Tick LCD
         if self.lcd.tick(cycles) {
@@ -760,9 +756,13 @@ mod tests {
         // Enable timer 1 interrupt in interrupt controller
         p.write_test(INT_BASE + 0x04, sources::TIMER1 as u8);
 
-        // Tick should overflow timer and raise interrupt
-        let pending = p.tick(2);
-        assert!(pending);
+        // Tick should overflow timer — but interrupt is deferred through delay pipeline
+        p.tick(2, 0);
+        assert!(p.timers.needs_delay_event);
+
+        // Simulate the delay pipeline processing (normally done by emu.rs TimerDelay event)
+        process_timer_delays(&mut p);
+
         assert!(p.irq_pending());
     }
 
@@ -780,7 +780,7 @@ mod tests {
         p.write_test(INT_BASE + 0x05, (sources::LCD >> 8) as u8); // High byte (bit 11)
 
         // Tick for a full frame (800_000 cycles at 48MHz/60Hz)
-        let pending = p.tick(800_000);
+        let pending = p.tick(800_000, 0);
         assert!(pending);
         assert!(p.irq_pending());
     }
@@ -800,8 +800,32 @@ mod tests {
         p.set_key(0, 0, true);
 
         // Tick should detect key and raise interrupt
-        let pending = p.tick(1);
+        let pending = p.tick(1, 0);
         assert!(pending);
+    }
+
+    /// Helper to process all pending delay tiers and raise timer interrupts
+    fn process_timer_delays(p: &mut Peripherals) {
+        loop {
+            if !p.timers.needs_delay_schedule() {
+                break;
+            }
+            let (_status, intrpt, has_more) = p.timers.process_delay();
+            for i in 0..3 {
+                if intrpt & (1 << i) != 0 {
+                    let source = match i {
+                        0 => sources::TIMER1,
+                        1 => sources::TIMER2,
+                        2 => sources::TIMER3,
+                        _ => unreachable!(),
+                    };
+                    p.interrupt.raise(source);
+                }
+            }
+            if !has_more {
+                break;
+            }
+        }
     }
 
     #[test]
@@ -843,15 +867,17 @@ mod tests {
         let enabled = sources::TIMER1 | sources::TIMER2 | sources::TIMER3;
         p.write_test(INT_BASE + 0x04, enabled as u8);
 
-        // Tick 2 cycles - should overflow timer 0
-        let pending = p.tick(2);
-        assert!(pending);
+        // Tick 2 cycles - should overflow timer 0 (deferred through delay pipeline)
+        p.tick(2, 0);
+        process_timer_delays(&mut p);
 
         // Tick 1 more - should overflow timer 1
-        p.tick(1);
+        p.tick(1, 0);
+        process_timer_delays(&mut p);
 
         // Tick 1 more - should overflow timer 2
-        p.tick(1);
+        p.tick(1, 0);
+        process_timer_delays(&mut p);
 
         // All 3 timers should have raised interrupts
         assert_ne!(p.interrupt.read(0x00) & sources::TIMER1 as u8, 0);
@@ -875,12 +901,15 @@ mod tests {
         // But don't enable the interrupt in the interrupt controller
         // (enabled = 0 by default)
 
-        // Tick should overflow timer but not report pending
-        let pending = p.tick(2);
-        assert!(!pending);
+        // Tick should overflow timer — deferred through delay pipeline
+        p.tick(2, 0);
+        // Process delay to apply status bits (interrupt controller still won't fire because not enabled)
+        process_timer_delays(&mut p);
+
+        // Timer status is latched but interrupt controller shouldn't report pending
         assert!(!p.irq_pending());
 
-        // Status should still be latched
+        // Status should still be latched in interrupt controller raw register
         assert_ne!(p.interrupt.read(0x00), 0);
     }
 

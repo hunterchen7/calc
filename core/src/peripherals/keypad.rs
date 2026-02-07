@@ -5,46 +5,35 @@
 //! The keypad is an 8x8 matrix. The controller scans rows and stores
 //! the column data in data registers.
 //!
+//! ## Register Layout (CEmu parity)
+//!
+//! Uses packed 32-bit registers with byte-within-register addressing:
+//! - Index 0x00 (offset 0x00-0x03): control — mode[1:0] | rowWait[15:2] | scanWait[31:16]
+//! - Index 0x01 (offset 0x04-0x07): size — rows[7:0] | cols[15:8] | mask[31:16]
+//! - Index 0x02 (offset 0x08-0x0B): status (read: status & enable; write: write-1-to-clear)
+//! - Index 0x03 (offset 0x0C-0x0F): enable (writes masked to & 0x07)
+//! - Index 0x04-0x0B (offset 0x10-0x2F): data[0..15] (16 rows x 2 bytes)
+//! - Index 0x10 (offset 0x40-0x43): gpioEnable
+//!
 //! ## Scan Timing
 //!
-//! When scanning is initiated (modes 1, 2 or 3), the controller scans one row
+//! When scanning is initiated (modes 2 or 3), the controller scans one row
 //! at a time with a configurable delay between rows. After all rows are
-//! scanned, status bits are updated and the scan either repeats (continuous)
-//! or stops (single scan).
+//! scanned, status bits are updated and the scan either repeats (modes 1/3)
+//! or stops (mode 2 single scan).
 //!
-//! ## Status Bits (INT_STATUS register, offset 0x08)
+//! ## Status Bits (status register, index 0x02)
 //!
 //! - Bit 0 (0x01): Scan complete - set when a full scan finishes
 //! - Bit 1 (0x02): Data changed - set when key state differs from previous scan
 //! - Bit 2 (0x04): Any key pressed - set when any key is detected during scan
 
-/// Number of keypad rows
+/// Number of physical keypad rows
 pub const KEYPAD_ROWS: usize = 8;
-/// Number of keypad columns
+/// Number of physical keypad columns
 pub const KEYPAD_COLS: usize = 8;
-
-/// Default cycles between scanning each row (based on CEmu timing)
-const DEFAULT_ROW_WAIT: u32 = 256;
-/// Default cycles between complete scan cycles
-const DEFAULT_SCAN_WAIT: u32 = 1024;
-
-/// Register offsets
-mod regs {
-    /// Control/mode register
-    pub const CONTROL: u32 = 0x00;
-    /// Matrix size configuration
-    pub const SIZE: u32 = 0x04;
-    /// Interrupt status
-    pub const INT_STATUS: u32 = 0x08;
-    /// Interrupt acknowledge/mask
-    pub const INT_ACK: u32 = 0x0C;
-    /// Row data registers (0x10-0x2F, 2 bytes per row)
-    pub const DATA_BASE: u32 = 0x10;
-    /// Row wait (cycles between row scans)
-    pub const ROW_WAIT: u32 = 0x30;
-    /// Scan wait (cycles between complete scans)
-    pub const SCAN_WAIT: u32 = 0x34;
-}
+/// Maximum rows supported by register layout
+const KEYPAD_MAX_ROWS: usize = 16;
 
 /// Status register bits
 mod status {
@@ -63,41 +52,52 @@ mod mode {
     pub const IDLE: u8 = 0;
     /// Single scan mode
     pub const SINGLE: u8 = 1;
-    /// Continuous scan with interrupt on any key
+    /// Continuous scan mode (single scan, goes idle after)
     pub const CONTINUOUS: u8 = 2;
-    /// Multi-group scan mode
+    /// Multi-group scan mode (repeating scan)
     pub const MULTI_GROUP: u8 = 3;
+}
+
+/// Register offsets (for documentation; actual addressing uses index-based scheme)
+#[allow(dead_code)]
+mod regs {
+    /// Control/mode register (packed 32-bit)
+    pub const CONTROL: u32 = 0x00;
+    /// Matrix size configuration (packed 32-bit)
+    pub const SIZE: u32 = 0x04;
+    /// Interrupt status
+    pub const INT_STATUS: u32 = 0x08;
+    /// Interrupt enable
+    pub const INT_ACK: u32 = 0x0C;
+    /// Row data registers (0x10-0x2F, 2 bytes per row)
+    pub const DATA_BASE: u32 = 0x10;
+    /// GPIO enable register
+    pub const GPIO_ENABLE: u32 = 0x40;
 }
 
 /// Keypad Controller
 #[derive(Debug, Clone)]
 pub struct KeypadController {
-    /// Control/mode register
-    control: u8,
-    /// Matrix rows configuration (byte 0 of SIZE)
-    rows: u8,
-    /// Matrix cols configuration (byte 1 of SIZE)
-    cols: u8,
-    /// Row mask (bytes 2-3 of SIZE) - determines which rows are active
-    mask: u16,
+    /// Packed control register: mode[1:0] | rowWait[15:2] | scanWait[31:16]
+    control: u32,
+    /// Packed size register: rows[7:0] | cols[15:8] | mask[31:16]
+    size: u32,
     /// Interrupt status
-    int_status: u8,
-    /// Interrupt mask
-    int_mask: u8,
-    /// Scan state: current row being scanned
-    scan_row: usize,
+    status: u8,
+    /// Interrupt enable (masked to 0x07 on writes)
+    enable: u8,
+    /// Current scan row (CEmu: keypad.row)
+    scan_row: u8,
+    /// Data registers (16 rows x 16-bit)
+    data: [u16; KEYPAD_MAX_ROWS],
+    /// GPIO enable register
+    gpio_enable: u32,
     /// Whether a scan is currently in progress
     scanning: bool,
     /// Cycles until next row scan or scan completion
     scan_cycles_remaining: u32,
-    /// Cycles between row scans
-    row_wait: u32,
-    /// Cycles between complete scan cycles
-    scan_wait: u32,
     /// Previous scan results for detecting data changes
-    prev_scan_data: [u16; KEYPAD_ROWS],
-    /// Current scan results (used for mode 1 combined data)
-    current_scan_data: [u16; KEYPAD_ROWS],
+    prev_scan_data: [u16; KEYPAD_MAX_ROWS],
     /// Whether any key was detected during current scan
     any_key_in_scan: bool,
     /// Whether data changed during current scan
@@ -115,18 +115,16 @@ impl KeypadController {
     pub fn new() -> Self {
         Self {
             control: 0,
-            rows: 8,
-            cols: 8,
-            mask: 0x00FF, // Default: all 8 rows enabled
-            int_status: 0,
-            int_mask: 0,
+            // rows=8 (byte 0), cols=8 (byte 1), mask=0xFFFF (bytes 2-3)
+            size: Self::pack_size(8, 8, 0xFFFF),
+            status: 0,
+            enable: 0,
             scan_row: 0,
+            data: [0x0000; KEYPAD_MAX_ROWS],
+            gpio_enable: 0,
             scanning: false,
             scan_cycles_remaining: 0,
-            row_wait: DEFAULT_ROW_WAIT,
-            scan_wait: DEFAULT_SCAN_WAIT,
-            prev_scan_data: [0x0000; KEYPAD_ROWS],
-            current_scan_data: [0x0000; KEYPAD_ROWS],
+            prev_scan_data: [0x0000; KEYPAD_MAX_ROWS],
             any_key_in_scan: false,
             data_changed_in_scan: false,
             needs_any_key_check: false,
@@ -137,34 +135,78 @@ impl KeypadController {
     /// Reset the keypad controller
     pub fn reset(&mut self) {
         self.control = 0;
-        self.rows = 8;
-        self.cols = 8;
-        self.mask = 0x00FF;
-        self.int_status = 0;
-        self.int_mask = 0;
+        // CEmu reset: keypad.mask = 0xFFFF, row = 0
+        // rows and cols are memset to 0 in CEmu init (not explicitly set in reset)
+        // But we keep rows=8, cols=8 as reasonable defaults that match init
+        self.size = Self::pack_size(8, 8, 0xFFFF);
+        self.status = 0;
+        self.enable = 0;
         self.scan_row = 0;
+        self.data = [0x0000; KEYPAD_MAX_ROWS];
+        self.gpio_enable = 0;
         self.scanning = false;
         self.scan_cycles_remaining = 0;
-        self.row_wait = DEFAULT_ROW_WAIT;
-        self.scan_wait = DEFAULT_SCAN_WAIT;
-        self.prev_scan_data = [0x0000; KEYPAD_ROWS];
-        self.current_scan_data = [0x0000; KEYPAD_ROWS];
+        self.prev_scan_data = [0x0000; KEYPAD_MAX_ROWS];
         self.any_key_in_scan = false;
         self.data_changed_in_scan = false;
         self.needs_any_key_check = false;
         self.key_edge_flags = [[false; KEYPAD_COLS]; KEYPAD_ROWS];
     }
 
+    // ========== Packed field accessors ==========
+
+    /// Get current scan mode (bits 1:0 of control)
+    pub fn mode(&self) -> u8 {
+        (self.control & 0x03) as u8
+    }
+
+    /// Set scan mode (bits 1:0 of control)
+    fn set_mode(&mut self, m: u8) {
+        self.control = (self.control & !0x03) | (m as u32 & 0x03);
+    }
+
+    /// Get row wait cycles (bits 15:2 of control)
+    fn row_wait(&self) -> u32 {
+        (self.control >> 2) & 0x3FFF
+    }
+
+    /// Get scan wait cycles (bits 31:16 of control)
+    fn scan_wait(&self) -> u32 {
+        (self.control >> 16) & 0xFFFF
+    }
+
+    /// Get number of rows (bits 7:0 of size)
+    fn rows(&self) -> u8 {
+        (self.size & 0xFF) as u8
+    }
+
+    /// Get number of columns (bits 15:8 of size)
+    fn cols(&self) -> u8 {
+        ((self.size >> 8) & 0xFF) as u8
+    }
+
+    /// Get row mask (bits 31:16 of size)
+    fn mask(&self) -> u16 {
+        ((self.size >> 16) & 0xFFFF) as u16
+    }
+
+    /// Pack size register from components
+    fn pack_size(rows: u8, cols: u8, mask: u16) -> u32 {
+        (rows as u32) | ((cols as u32) << 8) | ((mask as u32) << 16)
+    }
+
+    // ========== Key edge handling ==========
+
     /// Update key edge flag (called when key state changes)
     /// When pressed=true, sets edge flag (will be seen by next query)
     /// When pressed=false, does NOT clear edge (CEmu behavior)
     /// Edge flags are cleared only by query_row_data()
     ///
-    /// Also immediately updates current_scan_data so the key is visible
+    /// Also immediately updates data so the key is visible
     /// in data register reads regardless of keypad mode. This is critical
     /// for TI-OS key detection which may not switch to mode 1 before reading.
     ///
-    /// IMPORTANT: On key release, we do NOT clear current_scan_data!
+    /// IMPORTANT: On key release, we do NOT clear data!
     /// The data should persist until the OS reads and processes it.
     /// CEmu's edge detection works the same way - keymap_edge preserves
     /// the key press until it's queried.
@@ -180,48 +222,49 @@ impl KeypadController {
                 // Set edge on press, not on release (CEmu behavior)
                 self.key_edge_flags[row][col] = true;
 
-                // Immediately update current_scan_data so the key is visible
+                // Immediately update data so the key is visible
                 // This is needed because any_key_check only runs in mode 1,
                 // but TI-OS might read data registers in mode 0.
-                self.current_scan_data[row] |= 1 << col;
+                self.data[row] |= 1 << col;
 
                 // Set status flags
-                self.int_status |= status::DATA_CHANGED | status::ANY_KEY;
+                self.status |= status::DATA_CHANGED | status::ANY_KEY;
             } else {
                 // CEmu clears the keyMap bit on release:
                 // keyMap[row] &= ~(1 << col)
                 // The edge flag persists for detection, but the data should reflect
                 // current key state.
-                self.current_scan_data[row] &= !(1 << col);
+                self.data[row] &= !(1 << col);
             }
         }
     }
 
-    /// Get the current scan mode
-    pub fn mode(&self) -> u8 {
-        self.control & 0x03
-    }
+    // ========== Scan logic ==========
 
     /// Start a new scan cycle
     fn start_scan(&mut self) {
         self.scan_row = 0;
         self.scanning = true;
-        self.scan_cycles_remaining = self.row_wait;
+        self.scan_cycles_remaining = self.row_wait();
         self.any_key_in_scan = false;
         self.data_changed_in_scan = false;
     }
 
     /// Complete the current scan cycle
+    /// Matches CEmu's keypad_scan_event completion logic:
+    /// - Sets status bit 0 (scan done) always
+    /// - If mode & 1 (modes 1 or 3): restart scanning with scanWait + rowWait + 2
+    /// - If mode & 1 == 0 (mode 2): go to idle (set mode = 0)
     fn finish_scan(&mut self) {
-        // Set status bits based on scan results
-        self.int_status |= status::SCAN_DONE;
+        // Set scan complete status
+        self.status |= status::SCAN_DONE;
 
         if self.data_changed_in_scan {
-            self.int_status |= status::DATA_CHANGED;
+            self.status |= status::DATA_CHANGED;
         }
 
         if self.any_key_in_scan {
-            self.int_status |= status::ANY_KEY;
+            self.status |= status::ANY_KEY;
         }
 
         crate::emu::log_evt!(
@@ -229,19 +272,38 @@ impl KeypadController {
             self.mode(), self.any_key_in_scan, self.data_changed_in_scan
         );
 
-        // Save current scan data as previous for next comparison
-        self.prev_scan_data = self.current_scan_data;
+        // Save current data as previous for next comparison
+        self.prev_scan_data = self.data;
 
-        // In continuous mode (2), restart the scan after scan_wait delay
-        // In single scan mode (1) or multi-group (3), stop scanning
-        if self.mode() == mode::CONTINUOUS {
+        // CEmu: if (keypad.mode & 1) — modes 1 and 3 keep scanning
+        if self.mode() & 1 != 0 {
             self.scan_row = 0;
-            self.scan_cycles_remaining = self.scan_wait + self.row_wait;
+            self.scan_cycles_remaining = 2 + self.scan_wait() + self.row_wait();
             self.any_key_in_scan = false;
             self.data_changed_in_scan = false;
         } else {
+            // Mode 2 (continuous but bit 0 clear): go to idle after single scan
+            self.set_mode(mode::IDLE);
             self.scanning = false;
         }
+    }
+
+    /// Row limit for register iteration (capped at KEYPAD_MAX_ROWS)
+    fn row_limit(&self) -> usize {
+        let r = self.rows() as usize;
+        if r >= KEYPAD_MAX_ROWS { KEYPAD_MAX_ROWS } else { r }
+    }
+
+    /// Row limit for physical row access (capped at KEYPAD_ROWS)
+    fn actual_row_limit(&self) -> usize {
+        let r = self.rows() as usize;
+        if r >= KEYPAD_ROWS { KEYPAD_ROWS } else { r }
+    }
+
+    /// Data mask based on column count
+    fn data_mask(&self) -> u16 {
+        let col_limit = std::cmp::min(self.cols() as usize, KEYPAD_COLS);
+        (1u16 << col_limit) - 1
     }
 
     /// Advance the keypad controller by the given number of CPU cycles.
@@ -263,40 +325,46 @@ impl KeypadController {
                 cycles_left -= self.scan_cycles_remaining;
                 self.scan_cycles_remaining = 0;
 
-                // Scan the current row
-                if self.scan_row < KEYPAD_ROWS {
-                    // Use query_row_data instead of compute_row_data!
-                    // CEmu's keypad_scan_event calls keypad_query_keymap() which:
-                    // 1. Returns current state OR edge flags
-                    // 2. Clears edge flags after reading
-                    // This allows detecting quick press/release even if released before scan
-                    let row_data = self.query_row_data(self.scan_row, key_state);
-                    self.current_scan_data[self.scan_row] = row_data;
+                let row = self.scan_row as usize;
+                let row_limit = self.row_limit();
 
-                    // Check if any key is pressed in this row
-                    // Any key pressed = non-zero (active high)
-                    if row_data != 0 {
-                        self.any_key_in_scan = true;
-                        crate::emu::log_evt!("KEYPAD_SCAN_KEY: row={} data=0x{:04X}", self.scan_row, row_data);
+                // Scan the current row
+                if row < row_limit {
+                    let mut row_data: u16 = 0;
+                    if row < KEYPAD_ROWS {
+                        // Use query_row_data for edge detection (CEmu: keypad_query_keymap)
+                        row_data = self.query_row_data(row, key_state) & self.data_mask();
                     }
 
                     // Check if data changed from previous scan
-                    if row_data != self.prev_scan_data[self.scan_row] {
-                        self.data_changed_in_scan = true;
+                    if self.data[row] != row_data {
+                        self.status |= status::DATA_CHANGED;
+                        self.data[row] = row_data;
                     }
 
-                    self.scan_row += 1;
+                    // Check if any key is pressed in this row
+                    if row_data != 0 {
+                        self.any_key_in_scan = true;
+                        crate::emu::log_evt!("KEYPAD_SCAN_KEY: row={} data=0x{:04X}", row, row_data);
+                    }
 
-                    if self.scan_row >= KEYPAD_ROWS {
-                        // Scan complete
-                        self.finish_scan();
-                        // Check if we should raise an interrupt
-                        if (self.int_status & self.int_mask) != 0 {
-                            interrupt_pending = true;
-                        }
-                    } else {
-                        // Schedule next row
-                        self.scan_cycles_remaining = self.row_wait;
+                    // Check if data changed from previous scan cycle
+                    if row_data != self.prev_scan_data[row] {
+                        self.data_changed_in_scan = true;
+                    }
+                }
+
+                self.scan_row += 1;
+
+                if (self.scan_row as usize) < self.rows() as usize {
+                    // Schedule next row
+                    self.scan_cycles_remaining = self.row_wait();
+                } else {
+                    // Scan complete
+                    self.finish_scan();
+                    // Check if we should raise an interrupt
+                    if (self.status & self.enable) != 0 {
+                        interrupt_pending = true;
                     }
                 }
             } else {
@@ -306,23 +374,6 @@ impl KeypadController {
         }
 
         interrupt_pending
-    }
-
-    /// Compute row data from key matrix (non-destructive, current state only)
-    /// Returns a bitmask where 1 = pressed, 0 = not pressed (active high, matches CEmu)
-    #[allow(dead_code)]
-    fn compute_row_data(&self, row: usize, key_state: &[[bool; KEYPAD_COLS]; KEYPAD_ROWS]) -> u16 {
-        let mut result = 0x0000_u16; // All keys released
-
-        if row < KEYPAD_ROWS {
-            for col in 0..KEYPAD_COLS {
-                if key_state[row][col] {
-                    result |= 1 << col; // Key pressed = bit set
-                }
-            }
-        }
-
-        result
     }
 
     /// Query row data (destructive - clears edge flags after reading)
@@ -381,169 +432,117 @@ impl KeypadController {
         false
     }
 
+    // ========== Register read/write ==========
+
     /// Read a register byte
-    /// addr is offset from controller base (0-0x3F)
+    /// addr is offset from controller base (0x00-0x4F)
     /// key_state is the current keyboard matrix state
     pub fn read(&mut self, addr: u32, _key_state: &[[bool; KEYPAD_COLS]; KEYPAD_ROWS]) -> u8 {
-        match addr {
-            regs::CONTROL => {
-                self.control
-            }
-            // SIZE register is 4 bytes: rows, cols, mask_lo, mask_hi
-            a if a >= regs::SIZE && a < regs::SIZE + 4 => {
-                match a - regs::SIZE {
-                    0 => self.rows,
-                    1 => self.cols,
-                    2 => self.mask as u8,
-                    3 => (self.mask >> 8) as u8,
-                    _ => 0,
-                }
-            }
-            regs::INT_STATUS => {
-                // CEmu returns (status & enable), not raw status!
-                self.int_status & self.int_mask
-            }
-            regs::INT_ACK => self.int_mask,
-            a if a >= regs::DATA_BASE && a < regs::DATA_BASE + 0x20 => {
-                // Row data registers - each row has 2 bytes (16 bits)
-                let row_offset = (a - regs::DATA_BASE) as usize;
-                let row = row_offset / 2;
-                let byte = row_offset % 2;
+        let index = (addr >> 2) & 0x7F;
+        let bit_offset = (addr & 3) * 8;
 
-                if row < KEYPAD_ROWS {
-                    // Read from stored data (populated by any_key_check or scan events)
-                    let row_data = self.current_scan_data[row];
-
-                    if byte == 0 {
-                        row_data as u8
-                    } else {
-                        (row_data >> 8) as u8
-                    }
-                } else {
-                    0xFF
-                }
+        match index {
+            // control (packed 32-bit)
+            0x00 => ((self.control >> bit_offset) & 0xFF) as u8,
+            // size (packed 32-bit)
+            0x01 => ((self.size >> bit_offset) & 0xFF) as u8,
+            // status: reads return (status & enable) per CEmu
+            0x02 => (((self.status as u32 & self.enable as u32) >> bit_offset) & 0xFF) as u8,
+            // enable
+            0x03 => ((self.enable as u32 >> bit_offset) & 0xFF) as u8,
+            // data[0..15] — index 0x04-0x0B covers 16 rows x 2 bytes
+            0x04..=0x0B => {
+                let data_idx = ((addr.wrapping_sub(0x10)) >> 1) & 0x0F;
+                let byte_sel = (addr & 1) * 8;
+                ((self.data[data_idx as usize] >> byte_sel) & 0xFF) as u8
             }
-            // Row wait register (32-bit, little-endian)
-            a if a >= regs::ROW_WAIT && a < regs::ROW_WAIT + 4 => {
-                let byte_offset = (a - regs::ROW_WAIT) as usize;
-                (self.row_wait >> (byte_offset * 8)) as u8
-            }
-            // Scan wait register (32-bit, little-endian)
-            a if a >= regs::SCAN_WAIT && a < regs::SCAN_WAIT + 4 => {
-                let byte_offset = (a - regs::SCAN_WAIT) as usize;
-                (self.scan_wait >> (byte_offset * 8)) as u8
-            }
-            _ => 0xFF,
+            // gpioEnable (32-bit)
+            0x10 => ((self.gpio_enable >> bit_offset) & 0xFF) as u8,
+            // GPIO status is always 0
+            0x11 => 0,
+            _ => 0,
         }
     }
 
     /// Read a register byte without side effects (for debugging/testing)
-    /// addr is offset from controller base (0-0x3F)
+    /// addr is offset from controller base (0x00-0x4F)
     pub fn peek(&self, addr: u32, _key_state: &[[bool; KEYPAD_COLS]; KEYPAD_ROWS]) -> u8 {
-        match addr {
-            regs::CONTROL => self.control,
-            // SIZE register is 4 bytes: rows, cols, mask_lo, mask_hi
-            a if a >= regs::SIZE && a < regs::SIZE + 4 => {
-                match a - regs::SIZE {
-                    0 => self.rows,
-                    1 => self.cols,
-                    2 => self.mask as u8,
-                    3 => (self.mask >> 8) as u8,
-                    _ => 0,
-                }
-            }
-            regs::INT_STATUS => self.int_status & self.int_mask, // CEmu returns masked status
-            regs::INT_ACK => self.int_mask,
-            a if a >= regs::DATA_BASE && a < regs::DATA_BASE + 0x20 => {
-                let row_offset = (a - regs::DATA_BASE) as usize;
-                let row = row_offset / 2;
-                let byte = row_offset % 2;
+        let index = (addr >> 2) & 0x7F;
+        let bit_offset = (addr & 3) * 8;
 
-                if row < KEYPAD_ROWS {
-                    // Return stored scan data (consistent with read behavior)
-                    let row_data = self.current_scan_data[row];
-                    if byte == 0 {
-                        row_data as u8
-                    } else {
-                        (row_data >> 8) as u8
-                    }
-                } else {
-                    0xFF
-                }
+        match index {
+            0x00 => ((self.control >> bit_offset) & 0xFF) as u8,
+            0x01 => ((self.size >> bit_offset) & 0xFF) as u8,
+            0x02 => (((self.status as u32 & self.enable as u32) >> bit_offset) & 0xFF) as u8,
+            0x03 => ((self.enable as u32 >> bit_offset) & 0xFF) as u8,
+            0x04..=0x0B => {
+                let data_idx = ((addr.wrapping_sub(0x10)) >> 1) & 0x0F;
+                let byte_sel = (addr & 1) * 8;
+                ((self.data[data_idx as usize] >> byte_sel) & 0xFF) as u8
             }
-            a if a >= regs::ROW_WAIT && a < regs::ROW_WAIT + 4 => {
-                let byte_offset = (a - regs::ROW_WAIT) as usize;
-                (self.row_wait >> (byte_offset * 8)) as u8
-            }
-            a if a >= regs::SCAN_WAIT && a < regs::SCAN_WAIT + 4 => {
-                let byte_offset = (a - regs::SCAN_WAIT) as usize;
-                (self.scan_wait >> (byte_offset * 8)) as u8
-            }
-            _ => 0xFF,
+            0x10 => ((self.gpio_enable >> bit_offset) & 0xFF) as u8,
+            0x11 => 0,
+            _ => 0,
         }
     }
 
     /// Write a register byte
-    /// addr is offset from controller base (0-0x3F)
+    /// addr is offset from controller base (0x00-0x4F)
     pub fn write(&mut self, addr: u32, value: u8) {
-        match addr {
-            regs::CONTROL => {
-                let old_mode = self.mode();
-                self.control = value;
-                let new_mode = self.mode();
+        let index = (addr >> 2) & 0x7F;
+        let bit_offset = (addr & 3) * 8;
 
-                // Log mode changes only
-                if old_mode != new_mode {
-                    crate::emu::log_evt!("KEYPAD_MODE: changed {} -> {}", old_mode, new_mode);
-                }
+        match index {
+            // control — write byte into packed 32-bit, then handle mode change
+            0x00 => {
+                let mask = !(0xFF_u32 << bit_offset);
+                self.control = (self.control & mask) | ((value as u32) << bit_offset);
 
                 // CEmu: if (mode & 2) start scanning, else call any_key_check
-                if (new_mode & 2) != 0 {
+                if self.mode() & 2 != 0 {
                     // Mode 2 or 3: start scheduled scanning
-                    if old_mode != new_mode || new_mode == mode::MULTI_GROUP {
-                        self.start_scan();
-                    }
+                    self.start_scan();
                 } else {
                     // Mode 0 or 1: stop scanning and do immediate key check
                     self.scanning = false;
                     self.needs_any_key_check = true;
                 }
             }
-            // SIZE register is 4 bytes: rows, cols, mask_lo, mask_hi
-            a if a >= regs::SIZE && a < regs::SIZE + 4 => {
-                match a - regs::SIZE {
-                    0 => self.rows = value,
-                    1 => self.cols = value,
-                    2 => self.mask = (self.mask & 0xFF00) | (value as u16),
-                    3 => self.mask = (self.mask & 0x00FF) | ((value as u16) << 8),
-                    _ => {}
-                }
+            // size — write byte into packed 32-bit
+            0x01 => {
+                let mask = !(0xFF_u32 << bit_offset);
+                self.size = (self.size & mask) | ((value as u32) << bit_offset);
                 // CEmu calls keypad_any_check() after SIZE write
                 self.needs_any_key_check = true;
             }
-            regs::INT_STATUS => {
-                // Writing clears status bits (write-1-to-clear)
-                self.int_status &= !value;
-                // CEmu calls keypad_any_check() after clearing status!
-                // This updates data registers with current key state.
+            // status — write-1-to-clear (CEmu: write8(status, bit_offset, status >> bit_offset & ~byte))
+            0x02 => {
+                // CEmu's write-1-to-clear: the byte at bit_offset is replaced with
+                // (old_byte & ~value), i.e. clear bits that are set in value.
+                // Status is u8, so only byte 0 (bit_offset == 0) is meaningful.
+                if bit_offset == 0 {
+                    self.status &= !value;
+                }
+                // CEmu calls keypad_any_check() and keypad_intrpt_check() after clearing status
                 self.needs_any_key_check = true;
             }
-            regs::INT_ACK => {
-                self.int_mask = value;
+            // enable — masked to 0x07
+            0x03 => {
+                if bit_offset == 0 {
+                    self.enable = value & 0x07;
+                }
+                // CEmu calls keypad_intrpt_check() but not any_key_check
+                // We don't need the flag here since intrpt_check is handled by mod.rs
             }
-            // Row wait register (32-bit, little-endian)
-            a if a >= regs::ROW_WAIT && a < regs::ROW_WAIT + 4 => {
-                let byte_offset = (a - regs::ROW_WAIT) as usize;
-                let mask = !(0xFF_u32 << (byte_offset * 8));
-                self.row_wait = (self.row_wait & mask) | ((value as u32) << (byte_offset * 8));
+            // data registers are read-only (unless poke, which we don't support here)
+            0x04..=0x0B => {}
+            // gpioEnable
+            0x10 => {
+                let mask = !(0xFF_u32 << bit_offset);
+                self.gpio_enable = (self.gpio_enable & mask) | ((value as u32) << bit_offset);
             }
-            // Scan wait register (32-bit, little-endian)
-            a if a >= regs::SCAN_WAIT && a < regs::SCAN_WAIT + 4 => {
-                let byte_offset = (a - regs::SCAN_WAIT) as usize;
-                let mask = !(0xFF_u32 << (byte_offset * 8));
-                self.scan_wait = (self.scan_wait & mask) | ((value as u32) << (byte_offset * 8));
-            }
-            // Data registers are read-only
+            // GPIO status is always 0, no bits to reset
+            0x11 => {}
             _ => {}
         }
     }
@@ -555,7 +554,7 @@ impl KeypadController {
 
     /// Get the current status register value (without clearing)
     pub fn status(&self) -> u8 {
-        self.int_status
+        self.status
     }
 
     /// Immediate key check - called when a key is pressed to update data registers
@@ -575,46 +574,46 @@ impl KeypadController {
         // Compute combined key data from all rows in the mask
         // Uses query_row_data which includes edge flags and clears them
         let mut any: u16 = 0;
-        let row_limit = std::cmp::min(self.rows as usize, KEYPAD_ROWS);
+        let row_limit = self.actual_row_limit();
+        let mask = self.mask();
 
         for row in 0..row_limit {
             // Only query rows that are enabled in the mask
-            if (self.mask & (1 << row)) != 0 {
+            if (mask & (1 << row)) != 0 {
                 // Use query_row_data for edge detection (CEmu: keypad_query_keymap)
                 any |= self.query_row_data(row, key_state);
             }
         }
 
         // Apply column mask (data_mask in CEmu)
-        let col_limit = std::cmp::min(self.cols as usize, KEYPAD_COLS);
-        let data_mask: u16 = (1 << col_limit) - 1;
+        let data_mask = self.data_mask();
         any &= data_mask;
 
         if any != 0 {
-            crate::emu::log_evt!("ANY_KEY_CHECK: any=0x{:04X} mask=0x{:04X} int_status=0x{:02X}",
-                any, self.mask, self.int_status);
+            crate::emu::log_evt!("ANY_KEY_CHECK: any=0x{:04X} mask=0x{:04X} status=0x{:02X}",
+                any, mask, self.status);
         }
 
         // CEmu: Store combined 'any' in ALL rows that are in the mask
         // This is the critical behavior for TI-OS key detection!
-        let row_limit_full = std::cmp::min(self.rows as usize, KEYPAD_ROWS);
+        let row_limit_full = self.row_limit();
         for row in 0..row_limit_full {
-            if (self.mask & (1 << row)) != 0 {
+            if (mask & (1 << row)) != 0 {
                 // Check if data changed
-                if self.current_scan_data[row] != any {
-                    self.int_status |= status::DATA_CHANGED;
+                if self.data[row] != any {
+                    self.status |= status::DATA_CHANGED;
                 }
-                self.current_scan_data[row] = any;
+                self.data[row] = any;
             }
         }
 
         // Set any-key status if keys are pressed (CEmu: if (any & mask))
         if any != 0 {
-            self.int_status |= status::ANY_KEY;
+            self.status |= status::ANY_KEY;
         }
 
-        // Return true if interrupt should fire (status & mask)
-        (self.int_status & self.int_mask) != 0
+        // Return true if interrupt should fire (status & enable)
+        (self.status & self.enable) != 0
     }
 }
 
@@ -629,8 +628,8 @@ mod tests {
     use super::*;
 
     fn scan_keys(kp: &mut KeypadController, keys: &[[bool; KEYPAD_COLS]; KEYPAD_ROWS]) {
-        // Enable scanning and run enough cycles to capture a full scan.
-        kp.write(regs::CONTROL, mode::CONTINUOUS);
+        // Enable scanning in mode 2|1=3 (repeating scan) and run enough cycles.
+        kp.write(regs::CONTROL, mode::MULTI_GROUP);
         kp.tick(5000, keys);
     }
 
@@ -649,24 +648,26 @@ mod tests {
     fn test_new() {
         let kp = KeypadController::new();
         assert_eq!(kp.mode(), mode::IDLE);
-        assert_eq!(kp.rows, 8); // 8 rows
-        assert_eq!(kp.cols, 8); // 8 columns
-        assert_eq!(kp.mask, 0x00FF); // All 8 rows enabled
+        assert_eq!(kp.rows(), 8); // 8 rows
+        assert_eq!(kp.cols(), 8); // 8 columns
+        assert_eq!(kp.mask(), 0xFFFF); // CEmu default: all rows enabled
     }
 
     #[test]
     fn test_reset() {
         let mut kp = KeypadController::new();
-        kp.control = mode::CONTINUOUS;
-        kp.int_mask = 0x04;
-        kp.int_status = 0x01;
+        // Set some state via writes
+        kp.write(regs::CONTROL, mode::MULTI_GROUP);
+        kp.enable = 0x04;
+        kp.status = 0x01;
 
         kp.reset();
         assert_eq!(kp.mode(), mode::IDLE);
-        assert_eq!(kp.int_mask, 0);
-        assert_eq!(kp.int_status, 0);
-        assert_eq!(kp.rows, 8);
-        assert_eq!(kp.cols, 8);
+        assert_eq!(kp.enable, 0);
+        assert_eq!(kp.status, 0);
+        assert_eq!(kp.rows(), 8);
+        assert_eq!(kp.cols(), 8);
+        assert_eq!(kp.mask(), 0xFFFF);
     }
 
     #[test]
@@ -746,16 +747,16 @@ mod tests {
         let mut kp = KeypadController::new();
         let keys = empty_key_state();
 
-        kp.int_status = 0xFF;
-        kp.int_mask = 0xFF; // Enable all bits so we can read them back
+        kp.status = 0xFF;
+        kp.enable = 0x07; // Enable all valid bits so we can read them back
 
         // Writing to INT_STATUS should clear those bits
         kp.write(regs::INT_STATUS, 0x05);
-        let status = kp.read(regs::INT_STATUS, &keys);
-        // CEmu returns status & enable, so we expect (0xFF & !0x05) & 0xFF = 0xFA
-        assert_eq!(status, 0xFA);
-        // Internal status should also be 0xFA
-        assert_eq!(kp.int_status, 0xFA);
+        let status_read = kp.read(regs::INT_STATUS, &keys);
+        // CEmu returns status & enable, so we expect (0xFF & !0x05) & 0x07 = 0xFA & 0x07 = 0x02
+        assert_eq!(status_read, 0x02);
+        // Internal status should be 0xFA
+        assert_eq!(kp.status, 0xFA);
     }
 
     #[test]
@@ -767,8 +768,8 @@ mod tests {
         assert!(!kp.check_interrupt(&keys));
 
         // Enable continuous mode and interrupt mask
-        kp.control = mode::CONTINUOUS;
-        kp.int_mask = 0x04;
+        kp.write(regs::CONTROL, mode::CONTINUOUS);
+        kp.enable = 0x04;
 
         // Still no keys
         assert!(!kp.check_interrupt(&keys));
@@ -783,22 +784,22 @@ mod tests {
         let mut kp = KeypadController::new();
         let mut keys = empty_key_state();
         keys[0][0] = true;
-        kp.int_mask = 0x04; // Enable any key interrupt
+        kp.enable = 0x04; // Enable any key interrupt
 
         // IDLE mode - no interrupt
-        kp.control = mode::IDLE;
+        kp.write(regs::CONTROL, mode::IDLE);
         assert!(!kp.check_interrupt(&keys));
 
         // SINGLE mode (mode 1) - interrupt! (CEmu's keypad_any_check runs for mode 1)
-        kp.control = mode::SINGLE;
+        kp.write(regs::CONTROL, mode::SINGLE);
         assert!(kp.check_interrupt(&keys));
 
         // CONTINUOUS mode - interrupt!
-        kp.control = mode::CONTINUOUS;
+        kp.write(regs::CONTROL, mode::CONTINUOUS);
         assert!(kp.check_interrupt(&keys));
 
         // MULTI_GROUP mode - no interrupt (handled differently)
-        kp.control = mode::MULTI_GROUP;
+        kp.write(regs::CONTROL, mode::MULTI_GROUP);
         assert!(!kp.check_interrupt(&keys));
     }
 
@@ -807,10 +808,10 @@ mod tests {
         let mut kp = KeypadController::new();
         let keys = empty_key_state();
 
-        // Rows beyond 7 should return 0xFF
+        // Rows beyond KEYPAD_MAX_ROWS wrap around via & 0x0F
         scan_keys(&mut kp, &keys);
         let data = kp.read(regs::DATA_BASE + 0x10, &keys); // Row 8
-        assert_eq!(data, 0xFF);
+        assert_eq!(data, 0x00); // Wraps to data[8], which is 0
     }
 
     #[test]
@@ -818,8 +819,81 @@ mod tests {
         let mut kp = KeypadController::new();
         let keys = empty_key_state();
 
-        // Unknown register should return 0xFF
+        // Unknown register should return 0x00 (CEmu returns 0)
         let data = kp.read(0x3F, &keys);
-        assert_eq!(data, 0xFF);
+        assert_eq!(data, 0x00);
+    }
+
+    #[test]
+    fn test_packed_control_fields() {
+        let mut kp = KeypadController::new();
+
+        // Write mode to 3
+        kp.write(regs::CONTROL, 0x03);
+        assert_eq!(kp.mode(), 3);
+
+        // Write row_wait: bits 15:2 of control
+        // Write byte 0 with mode=1 and some row_wait bits
+        // mode=01, rowWait lower bits = 0x10 -> byte 0 = 0x41
+        kp.control = 0;
+        kp.write(regs::CONTROL, 0x41); // mode=1, rowWait lower 6 bits = 0x10
+        assert_eq!(kp.mode(), 1);
+        assert_eq!(kp.row_wait(), 0x10);
+
+        // Write scan_wait via byte 2 of control
+        kp.write(regs::CONTROL + 2, 0x04); // scanWait low byte = 4
+        assert_eq!(kp.scan_wait(), 4);
+    }
+
+    #[test]
+    fn test_packed_size_fields() {
+        let mut kp = KeypadController::new();
+
+        // Default: rows=8, cols=8, mask=0xFFFF
+        assert_eq!(kp.rows(), 8);
+        assert_eq!(kp.cols(), 8);
+        assert_eq!(kp.mask(), 0xFFFF);
+
+        // Write rows via byte 0 of size
+        kp.write(regs::SIZE, 4);
+        assert_eq!(kp.rows(), 4);
+        assert_eq!(kp.cols(), 8); // unchanged
+
+        // Write cols via byte 1 of size
+        kp.write(regs::SIZE + 1, 6);
+        assert_eq!(kp.cols(), 6);
+
+        // Write mask via bytes 2-3 of size
+        kp.write(regs::SIZE + 2, 0x0F); // mask low byte
+        kp.write(regs::SIZE + 3, 0x00); // mask high byte
+        assert_eq!(kp.mask(), 0x000F);
+    }
+
+    #[test]
+    fn test_enable_masked() {
+        let mut kp = KeypadController::new();
+        let keys = empty_key_state();
+
+        // Enable register should be masked to 0x07
+        kp.write(regs::INT_ACK, 0xFF);
+        assert_eq!(kp.enable, 0x07);
+
+        // Read it back
+        let val = kp.read(regs::INT_ACK, &keys);
+        assert_eq!(val, 0x07);
+    }
+
+    #[test]
+    fn test_gpio_enable() {
+        let mut kp = KeypadController::new();
+        let keys = empty_key_state();
+
+        // Write to GPIO enable register
+        kp.write(regs::GPIO_ENABLE, 0xAB);
+        kp.write(regs::GPIO_ENABLE + 1, 0xCD);
+
+        assert_eq!(kp.read(regs::GPIO_ENABLE, &keys), 0xAB);
+        assert_eq!(kp.read(regs::GPIO_ENABLE + 1, &keys), 0xCD);
+        assert_eq!(kp.gpio_enable, 0x0000CDAB);
     }
 }

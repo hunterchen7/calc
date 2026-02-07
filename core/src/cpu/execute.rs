@@ -345,14 +345,10 @@ impl Cpu {
         match z {
             0 => {
                 // RET cc
-                // Uses L mode for stack operations, then ADL becomes L
-                bus.add_cycles(1); // CEmu: cpu.cycles++ before condition check
+                // CEmu: cpu.cycles++ before condition check, then cpu_return()
+                bus.add_cycles(1);
                 if self.check_cc(y) {
-                    bus.add_cycles(1); // CEmu: cpu.cycles++ at start of cpu_return()
-                    let target = self.pop_addr(bus);
-                    self.prefetch(bus, target); // Reload prefetch at return address
-                    self.pc = target;
-                    self.adl = self.l;
+                    self.return_impl(bus);
                     if self.adl {
                         12
                     } else {
@@ -378,12 +374,8 @@ impl Cpu {
                     match p {
                         0 => {
                             // RET
-                            // Uses L mode for stack operations, then ADL becomes L
-                            bus.add_cycles(1); // CEmu: cpu.cycles++ in cpu_return()
-                            let target = self.pop_addr(bus);
-                            self.prefetch(bus, target); // Reload prefetch at return address
-                            self.pc = target;
-                            self.adl = self.l;
+                            // CEmu: cpu_return()
+                            self.return_impl(bus);
                             10
                         }
                         1 => {
@@ -504,14 +496,11 @@ impl Cpu {
                 // CEmu: uses no_prefetch only when taken, regular fetch otherwise
                 if self.check_cc(y) {
                     let nn = self.fetch_addr_no_prefetch(bus);
-                    // CEmu: cpu.cycles += !cpu.SUFFIX && !cpu.ADL (only in Z80 mode)
+                    // CEmu: cpu.cycles += !cpu.SUFFIX && !cpu.ADL (only in Z80 mode without suffix)
                     if !self.suffix && !self.adl {
                         bus.add_cycles(1);
                     }
-                    self.push_addr(bus, self.pc);
-                    self.prefetch(bus, nn); // Reload prefetch at target
-                    self.pc = nn;
-                    self.adl = self.il;
+                    self.call_impl(bus, nn, self.il, self.suffix);
                     if self.adl {
                         20
                     } else {
@@ -545,10 +534,7 @@ impl Cpu {
                             // Fetch uses IL mode, push uses L mode, then ADL becomes IL
                             // Use fetch_addr_no_prefetch to match CEmu's cpu_fetch_word_no_prefetch
                             let nn = self.fetch_addr_no_prefetch(bus);
-                            self.push_addr(bus, self.pc);
-                            self.prefetch(bus, nn); // Reload prefetch at target
-                            self.pc = nn;
-                            self.adl = self.il;
+                            self.call_impl(bus, nn, self.il, self.suffix);
                             if self.adl {
                                 20
                             } else {
@@ -593,12 +579,9 @@ impl Cpu {
             }
             7 => {
                 // RST y*8
-                bus.add_cycles(1); // CEmu: cpu.cycles++ in cpu_rst()
-                self.push_addr(bus, self.pc);
-                self.adl = self.l;
+                // CEmu: cpu_rst(context.y << 3, cpu.L, cpu.L, cpu.SUFFIX)
                 let target = (y as u32) * 8;
-                self.prefetch(bus, target); // Reload prefetch at target
-                self.pc = target;
+                self.rst_impl(bus, target, self.l, self.l, self.suffix);
                 11
             }
             _ => 4,
@@ -1136,23 +1119,15 @@ impl Cpu {
                 // y=7: STMIX (ED 7D) - set mixed memory mode
                 match y {
                     0 => {
-                        // RETN - Uses L mode for stack operations, then ADL becomes L
-                        bus.add_cycles(1); // CEmu: cpu.cycles++ in cpu_return()
+                        // RETN - CEmu: cpu_return() (identical to RETI)
                         self.iff1 = self.iff2;
-                        let target = self.pop_addr(bus);
-                        self.prefetch(bus, target); // Reload prefetch at return address
-                        self.pc = target;
-                        self.adl = self.l;
+                        self.return_impl(bus);
                         14
                     }
                     1 => {
-                        // RETI - Uses L mode for stack operations, then ADL becomes L
-                        bus.add_cycles(1); // CEmu: cpu.cycles++ in cpu_return()
-                        self.iff1 = self.iff2; // Matches RETN behavior
-                        let target = self.pop_addr(bus);
-                        self.prefetch(bus, target); // Reload prefetch at return address
-                        self.pc = target;
-                        self.adl = self.l;
+                        // RETI - CEmu: cpu_return() (identical to RETN)
+                        self.iff1 = self.iff2;
+                        self.return_impl(bus);
                         14
                     }
                     4 => {
@@ -2574,5 +2549,98 @@ impl Cpu {
             }
             _ => 23,
         }
+    }
+
+    // ========== Mixed-mode CALL/RET/RST (7B) ==========
+    // These implement CEmu's cpu_call(), cpu_return(), and cpu_rst() with
+    // mixed-mode support when suffix opcodes (.SIS/.LIS/.SIL/.LIL) are active.
+
+    /// CALL implementation matching CEmu's cpu_call(address, mode, mixed)
+    /// Handles both normal and mixed-mode (suffix) CALL instructions.
+    pub(super) fn call_impl(&mut self, bus: &mut Bus, address: u32, mode: bool, mixed: bool) {
+        if mixed {
+            // Mixed-mode CALL: push flag byte for cross-mode transitions
+            let stack = self.il || (self.l && !self.adl);
+            // CEmu: cpu.registers.R += cpu.IL << 1
+            if self.il {
+                self.r = (self.r & 0x80) | ((self.r.wrapping_add(2)) & 0x7F);
+            }
+            let flag_byte = ((self.madl as u8) << 1) | (self.adl as u8);
+            if self.adl {
+                self.push_byte_mode(bus, (self.pc >> 16) as u8, true); // PCU via SPL
+                if !self.il {
+                    self.push_byte_mode(bus, flag_byte, true); // flag byte via SPL
+                }
+            }
+            self.push_byte_mode(bus, (self.pc >> 8) as u8, stack); // PCH
+            self.push_byte_mode(bus, self.pc as u8, stack); // PCL
+            if self.il || !self.adl {
+                self.push_byte_mode(bus, flag_byte, true); // flag byte via SPL
+            }
+        } else {
+            // Normal CALL: push PC using L mode
+            self.push_addr(bus, self.pc);
+        }
+        self.adl = mode;
+        self.prefetch(bus, address);
+        self.pc = address;
+    }
+
+    /// RET implementation matching CEmu's cpu_return()
+    /// Handles both normal and mixed-mode (suffix) RET/RETN/RETI.
+    pub(super) fn return_impl(&mut self, bus: &mut Bus) {
+        bus.add_cycles(1); // CEmu: cpu.cycles++ in cpu_return()
+        if self.suffix {
+            // Mixed-mode RET: pop flag byte to determine return mode
+            let mode = self.pop_byte_mode(bus, true) & 1 != 0; // flag byte via SPL
+            let pcl = self.pop_byte_mode(bus, self.adl) as u32;
+            let pch = self.pop_byte_mode(bus, self.adl) as u32;
+            let address = if mode {
+                // Returning to ADL mode: also pop PCU
+                let pcu = self.pop_byte_mode(bus, true) as u32;
+                // CEmu: cpu_mask_mode(cpu_pop_byte_mode(true) << 16, cpu.ADL || cpu.L)
+                let pcu_masked = if self.adl || self.l {
+                    (pcu << 16) & 0xFFFFFF
+                } else {
+                    0 // 16-bit mode: upper byte masked away
+                };
+                pcl | (pch << 8) | pcu_masked
+            } else {
+                pcl | (pch << 8)
+            };
+            self.adl = mode;
+            self.prefetch(bus, address);
+            self.pc = address;
+        } else {
+            // Normal RET: pop address using L mode
+            let target = self.pop_addr(bus);
+            self.adl = self.l;
+            self.prefetch(bus, target);
+            self.pc = target;
+        }
+    }
+
+    /// RST implementation matching CEmu's cpu_rst(address, stack, mode, mixed)
+    pub(super) fn rst_impl(&mut self, bus: &mut Bus, address: u32, stack: bool, mode: bool, mixed: bool) {
+        bus.add_cycles(1); // CEmu: cpu.cycles++ in cpu_rst()
+        if mixed {
+            // Mixed-mode RST: push flag byte for cross-mode transitions
+            let flag_byte = ((self.madl as u8) << 1) | (self.adl as u8);
+            if self.adl {
+                self.push_byte_mode(bus, (self.pc >> 16) as u8, true); // PCU via SPL
+                self.push_byte_mode(bus, flag_byte, true); // flag byte via SPL
+            }
+            self.push_byte_mode(bus, (self.pc >> 8) as u8, stack); // PCH
+            self.push_byte_mode(bus, self.pc as u8, stack); // PCL
+            if !self.adl {
+                self.push_byte_mode(bus, flag_byte, true); // flag byte via SPL
+            }
+        } else {
+            // Normal RST: push PC using L mode
+            self.push_addr(bus, self.pc);
+        }
+        self.adl = mode;
+        self.prefetch(bus, address);
+        self.pc = address;
     }
 }

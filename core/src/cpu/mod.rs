@@ -387,12 +387,11 @@ impl Cpu {
         bus.cpu_pc = self.pc;
 
         // eZ80 per-instruction mode handling:
-        // L and IL are reset to ADL at the start of each instruction, UNLESS
-        // the previous instruction was a suffix opcode that set them.
-        if !self.suffix {
-            self.l = self.adl;
-            self.il = self.adl;
-        }
+        // L and IL are always reset to ADL at the start of each instruction.
+        // Suffix opcodes (.SIS/.LIS/.SIL/.LIL) override L/IL within the
+        // instruction's fetch loop below. Matches CEmu's cpu_clear_context().
+        self.l = self.adl;
+        self.il = self.adl;
         self.suffix = false;
 
         // Note: DD/FD prefixes are now executed immediately in execute_x3,
@@ -429,6 +428,7 @@ impl Cpu {
                 let r = (opcode & 0x02) != 0; // IL mode (bit 1)
                 self.l = s;
                 self.il = r;
+                self.suffix = true; // Mark as suffixed for mixed-mode CALL/RET/RST
                 // Continue to fetch and execute the next instruction with modified modes
                 // This matches CEmu's behavior where suffix + instruction are atomic
                 continue;
@@ -468,6 +468,7 @@ impl Cpu {
 
     /// Handle maskable interrupt (IRQ)
     /// Matches CEmu's interrupt entry in cpu.c:943-969
+    /// CEmu calls cpu_interrupt(0x38) → cpu_rst(0x38, cpu.ADL, cpu.ADL|cpu.MADL, cpu.MADL)
     fn handle_irq(&mut self, bus: &mut Bus) -> u32 {
         let was_halted = self.halted;
 
@@ -488,10 +489,9 @@ impl Cpu {
         self.iff1 = false;
         self.halted = false;
 
-        // All modes on TI-84 CE (eZ80) jump to 0x38
-        self.push_addr(bus, self.pc);
-        self.prefetch(bus, 0x38);
-        self.pc = 0x38;
+        // CEmu: cpu_interrupt(0x38) → cpu_rst(0x38, cpu.ADL, cpu.ADL|cpu.MADL, cpu.MADL)
+        // rst_impl handles both normal and mixed-mode (MADL) interrupt entry
+        self.rst_impl(bus, 0x38, self.adl, mode, self.madl);
         // Return 0 — cycles already tracked via bus
         0
     }

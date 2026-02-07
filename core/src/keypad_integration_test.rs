@@ -223,15 +223,16 @@ mod tests {
         println!("Keypad CONTROL: 0x{:02X}", control);
 
         // Read size register bytes
-        // SIZE register is now 4 bytes: rows (8), cols (8), mask_lo (0xFF), mask_hi (0x00)
+        // SIZE register is packed 32-bit: rows[7:0] | cols[15:8] | mask[31:16]
+        // CEmu default: rows=8, cols=8, mask=0xFFFF
         let rows = bus.read_byte(KEYPAD_SIZE);
         assert_eq!(rows, 8, "Rows should be 8");
         let cols = bus.read_byte(KEYPAD_SIZE + 1);
         assert_eq!(cols, 8, "Cols should be 8");
         let mask_lo = bus.read_byte(KEYPAD_SIZE + 2);
-        assert_eq!(mask_lo, 0xFF, "Mask low byte should be 0xFF (all 8 rows enabled)");
+        assert_eq!(mask_lo, 0xFF, "Mask low byte should be 0xFF");
         let mask_hi = bus.read_byte(KEYPAD_SIZE + 3);
-        assert_eq!(mask_hi, 0x00, "Mask high byte should be 0x00");
+        assert_eq!(mask_hi, 0xFF, "Mask high byte should be 0xFF (CEmu default: mask=0xFFFF)");
 
         // Read status register
         let status = bus.read_byte(KEYPAD_STATUS);
@@ -330,7 +331,7 @@ mod tests {
 
         // Simulate some cycles (tick the peripherals)
         println!("3. Run 1000 cycles");
-        bus.ports.tick(1000);
+        bus.ports.tick(1000, 0);
 
         // Read again - data persists since key is still held
         let row3 = bus.read_byte(0xF50016);

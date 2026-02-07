@@ -489,8 +489,7 @@ impl Emu {
             }
 
             // Tick peripherals and check for interrupts
-            let tick_irq = self.bus.ports.tick(cycles_used);
-            if tick_irq {
+            if self.tick_peripherals(cycles_used) {
                 self.cpu.irq_pending = true;
             }
 
@@ -511,8 +510,7 @@ impl Emu {
                     // Process any events that just fired
                     self.process_scheduler_events();
                     // Tick peripherals with skipped cycles so OS timer/LCD/etc. advance
-                    let tick_irq2 = self.bus.ports.tick(skip as u32);
-                    if tick_irq2 {
+                    if self.tick_peripherals(skip as u32) {
                         self.cpu.irq_pending = true;
                     }
                 } else if !self.cpu.iff1 && !self.cpu.nmi_pending {
@@ -571,7 +569,7 @@ impl Emu {
                 self.cpu.nmi_pending = true;
             }
 
-            if self.bus.ports.tick(cycles_used) {
+            if self.tick_peripherals(cycles_used) {
                 self.cpu.irq_pending = true;
             }
 
@@ -585,7 +583,7 @@ impl Emu {
                     self.total_cycles = self.bus.total_cycles();
                     self.scheduler.advance(skip);
                     self.process_scheduler_events();
-                    if self.bus.ports.tick(skip as u32) {
+                    if self.tick_peripherals(skip as u32) {
                         self.cpu.irq_pending = true;
                     }
                 } else if !self.cpu.iff1 && !self.cpu.nmi_pending {
@@ -684,8 +682,7 @@ impl Emu {
         }
 
         // Tick peripherals and check for interrupts
-        let tick_irq = self.bus.ports.tick(cycles_used);
-        if tick_irq {
+        if self.tick_peripherals(cycles_used) {
             self.cpu.irq_pending = true;
         }
 
@@ -700,7 +697,7 @@ impl Emu {
                 self.total_cycles = self.bus.total_cycles();
                 self.scheduler.advance(skip);
                 self.process_scheduler_events();
-                if self.bus.ports.tick(skip as u32) {
+                if self.tick_peripherals(skip as u32) {
                     self.cpu.irq_pending = true;
                 }
             }
@@ -732,6 +729,24 @@ impl Emu {
         })
     }
 
+    /// Tick peripherals and handle timer delay pipeline scheduling.
+    /// Returns true if any interrupt is pending.
+    fn tick_peripherals(&mut self, cycles: u32) -> bool {
+        // Get timer delay remaining for the delay pipeline packing
+        let delay_remaining = self.scheduler.ticks_remaining(EventId::TimerDelay);
+        let irq = self.bus.ports.tick(cycles, delay_remaining);
+
+        // If timer tick generated new delay pipeline data, schedule the TimerDelay event
+        if self.bus.ports.timers.needs_delay_event {
+            self.bus.ports.timers.needs_delay_event = false;
+            if !self.scheduler.is_active(EventId::TimerDelay) {
+                self.scheduler.set(EventId::TimerDelay, 2);
+            }
+        }
+
+        irq
+    }
+
     /// Process any pending scheduler events
     fn process_scheduler_events(&mut self) {
         use crate::peripherals::interrupt::sources;
@@ -757,6 +772,29 @@ impl Emu {
                     } else {
                         // No more transfers pending
                         self.scheduler.clear(EventId::Spi);
+                    }
+                }
+                EventId::TimerDelay => {
+                    // Timer 2-cycle delay pipeline: process one tier of deferred interrupts
+                    let (_status, intrpt, has_more) = self.bus.ports.timers.process_delay();
+                    // Raise interrupts for each timer that has pending bits
+                    for i in 0..3 {
+                        if intrpt & (1 << i) != 0 {
+                            let source = match i {
+                                0 => sources::TIMER1,
+                                1 => sources::TIMER2,
+                                2 => sources::TIMER3,
+                                _ => unreachable!(),
+                            };
+                            self.bus.ports.interrupt.raise(source);
+                            self.cpu.irq_pending = true;
+                        }
+                    }
+                    if has_more {
+                        // More tiers pending — reschedule for 1 more CPU cycle
+                        self.scheduler.set(EventId::TimerDelay, 1);
+                    } else {
+                        self.scheduler.clear(EventId::TimerDelay);
                     }
                 }
                 EventId::Timer0 => {
@@ -1014,8 +1052,8 @@ impl Emu {
 
     // ========== State Persistence ==========
 
-    /// State format version (v3: CPU snapshot grew from 64→67 bytes for SPS/SPL split)
-    const STATE_VERSION: u32 = 4;
+    /// State format version (v5: scheduler snapshot grew from 72→80 bytes for TimerDelay event)
+    const STATE_VERSION: u32 = 5;
     /// Magic bytes for state file identification
     const STATE_MAGIC: [u8; 4] = *b"CE84";
     /// Header size: magic(4) + version(4) + rom_hash(8) + data_len(4) = 20

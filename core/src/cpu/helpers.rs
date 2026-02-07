@@ -513,6 +513,38 @@ impl Cpu {
         val
     }
 
+    /// Push a byte using explicit mode (for mixed-mode CALL/RST)
+    /// mode=true: use SPL (24-bit), mode=false: use SPS (16-bit) with MBASE
+    /// CEmu: cpu_push_byte_mode(value, mode)
+    #[inline]
+    pub fn push_byte_mode(&mut self, bus: &mut Bus, val: u8, mode: bool) {
+        if mode {
+            self.spl = self.spl.wrapping_sub(1) & 0xFFFFFF;
+            bus.write_byte(self.spl, val);
+        } else {
+            self.sps = self.sps.wrapping_sub(1) & 0xFFFF;
+            let addr = ((self.mbase as u32) << 16) | self.sps;
+            bus.write_byte(addr, val);
+        }
+    }
+
+    /// Pop a byte using explicit mode (for mixed-mode RET)
+    /// mode=true: use SPL (24-bit), mode=false: use SPS (16-bit) with MBASE
+    /// CEmu: cpu_pop_byte_mode(mode)
+    #[inline]
+    pub fn pop_byte_mode(&mut self, bus: &mut Bus, mode: bool) -> u8 {
+        if mode {
+            let val = bus.read_byte(self.spl);
+            self.spl = self.spl.wrapping_add(1) & 0xFFFFFF;
+            val
+        } else {
+            let addr = ((self.mbase as u32) << 16) | self.sps;
+            let val = bus.read_byte(addr);
+            self.sps = self.sps.wrapping_add(1) & 0xFFFF;
+            val
+        }
+    }
+
     /// Push a word (16-bit) onto the stack
     #[inline]
     pub fn push_word(&mut self, bus: &mut Bus, val: u16) {

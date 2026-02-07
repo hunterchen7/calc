@@ -62,13 +62,14 @@ pub struct GeneralTimers {
     mask: u32,
     /// Accumulated cycles per timer (for clock division / scheduling)
     accum_cycles: [u32; 3],
-    // TODO: Timer 2-cycle interrupt delay pipeline (Phase 4F)
-    // CEmu uses gpt.delayStatus/gpt.delayIntrpt with SCHED_TIMER_DELAY
-    // to defer status/interrupt by 2 CPU cycles. This requires scheduler
-    // integration. For now, interrupts fire immediately on match/overflow.
-    // Fields reserved for future implementation:
-    _delay_status: u32,
-    _delay_intrpt: u8,
+    /// Delay pipeline for 2-cycle interrupt deferral (CEmu: gpt.delayStatus)
+    /// Packs 3 status bits per timer x 3 timers x 3 delay tiers = 27 bits
+    pub delay_status: u32,
+    /// Delay pipeline interrupt bits (CEmu: gpt.delayIntrpt)
+    /// Packs 3 bits per delay tier (one per timer), needs 12 bits max
+    pub delay_intrpt: u16,
+    /// Flag indicating the delay pipeline needs scheduling
+    pub needs_delay_event: bool,
 }
 
 /// Revision constant
@@ -82,8 +83,9 @@ impl GeneralTimers {
             status: 0,
             mask: 0,
             accum_cycles: [0; 3],
-            _delay_status: 0,
-            _delay_intrpt: 0,
+            delay_status: 0,
+            delay_intrpt: 0,
+            needs_delay_event: false,
         }
     }
 
@@ -95,8 +97,9 @@ impl GeneralTimers {
         self.status = 0;
         self.mask = 0;
         self.accum_cycles = [0; 3];
-        self._delay_status = 0;
-        self._delay_intrpt = 0;
+        self.delay_status = 0;
+        self.delay_intrpt = 0;
+        self.needs_delay_event = false;
     }
 
     /// Check if a specific timer is enabled
@@ -189,12 +192,16 @@ impl GeneralTimers {
         }
     }
 
-    /// Tick all timers with given CPU cycles
+    /// Tick all timers with given CPU cycles.
     /// cpu_speed: current CPU speed setting (0=6MHz, 1=12MHz, 2=24MHz, 3=48MHz)
-    /// Returns a bitmask of which timer interrupts fired (bit 0=timer0, 1=timer1, 2=timer2)
-    pub fn tick(&mut self, cycles: u32, cpu_speed: u8) -> u8 {
-        let mut fired: u8 = 0;
-
+    /// delay_remaining: CPU cycles remaining until the TimerDelay event fires (0 if not active)
+    ///
+    /// Match/overflow conditions are packed into the delay pipeline instead of
+    /// setting status directly. The caller must check `needs_delay_event` and
+    /// schedule EventId::TimerDelay if it becomes true.
+    ///
+    /// Returns 0 (interrupts are deferred through the delay pipeline).
+    pub fn tick(&mut self, cycles: u32, cpu_speed: u8, delay_remaining: u64) -> u8 {
         for i in 0..3 {
             if !self.is_enabled(i) {
                 continue;
@@ -234,17 +241,20 @@ impl GeneralTimers {
             let old_counter = self.timer[i].counter;
             let inverted = self.is_inverted(i);
 
+            // Accumulate new status bits for this timer in a local variable
+            let mut new_status: u32 = 0;
+
             if inverted {
                 // Count down
                 if self.timer[i].counter >= ticks {
                     self.timer[i].counter -= ticks;
 
                     // Check match conditions
-                    self.check_matches_down(i, old_counter, self.timer[i].counter);
+                    new_status |= self.check_matches_down_bits(i, old_counter, self.timer[i].counter);
                 } else {
                     // Underflow
                     let remaining = ticks - self.timer[i].counter;
-                    self.check_matches_down(i, old_counter, 0);
+                    new_status |= self.check_matches_down_bits(i, old_counter, 0);
 
                     // Check if overflow/reset enable is set (control bit i*3+2)
                     if self.control & (1 << (i * 3 + 2)) != 0 {
@@ -253,7 +263,7 @@ impl GeneralTimers {
                         self.timer[i].counter = 0xFFFFFFFF_u32.wrapping_sub(remaining - 1);
                     }
                     // Set overflow/zero status bit
-                    self.status |= 1 << (i * 3 + 2);
+                    new_status |= 1 << (i * 3 + 2);
                 }
             } else {
                 // Count up
@@ -261,7 +271,7 @@ impl GeneralTimers {
                 self.timer[i].counter = new_val;
 
                 // Check match conditions
-                self.check_matches_up(i, old_counter, new_val, overflow);
+                new_status |= self.check_matches_up_bits(i, old_counter, new_val, overflow);
 
                 if overflow {
                     // Check if overflow/reset enable is set
@@ -269,23 +279,40 @@ impl GeneralTimers {
                         self.timer[i].counter = self.timer[i].reset.wrapping_add(new_val);
                     }
                     // Set overflow/zero status bit
-                    self.status |= 1 << (i * 3 + 2);
+                    new_status |= 1 << (i * 3 + 2);
                 }
             }
 
-            // Check if any status bits for this timer are set and masked
-            let timer_status = (self.status >> (i * 3)) & 0x7;
-            let timer_mask = (self.mask >> (i * 3)) & 0x7;
-            if timer_status & timer_mask != 0 {
-                fired |= 1 << i;
+            // Pack new status bits into the delay pipeline (CEmu: gpt_next_event lines 64-73)
+            if new_status != 0 {
+                // Determine delay tier based on how many cycles until TimerDelay fires.
+                // delay_remaining is 0 if TimerDelay is not active (we'll schedule it for 2 cycles).
+                let delay = if delay_remaining == 0 { 2u64 } else { delay_remaining.min(2) };
+
+                // CEmu packing formula:
+                //   delayStatus |= status << (((2 - delay)*3 + index)*3)
+                //   delayIntrpt |= 1 << (3*(4 - delay) + index)
+                //
+                // Note: new_status has bits at positions i*3..i*3+2 in the 9-bit status word.
+                // CEmu's 'status' is the 3-bit per-timer value, so extract just this timer's bits.
+                let timer_status = (new_status >> (i as u32 * 3)) & 0x7;
+                let tier = (2 - delay) as u32;
+                let status_shift = (tier * 3 + i as u32) * 3;
+                self.delay_status |= timer_status << status_shift;
+                let intrpt_shift = 3u32.wrapping_mul(4u32.wrapping_sub(delay as u32)) + i as u32;
+                self.delay_intrpt |= 1u16 << intrpt_shift;
+
+                self.needs_delay_event = true;
             }
         }
 
-        fired
+        // Interrupts are now deferred through the delay pipeline
+        0
     }
 
-    /// Check match conditions when counting up
-    fn check_matches_up(&mut self, i: usize, old: u32, new: u32, overflow: bool) {
+    /// Check match conditions when counting up, returning status bits (not setting self.status)
+    fn check_matches_up_bits(&self, i: usize, old: u32, new: u32, overflow: bool) -> u32 {
+        let mut status = 0u32;
         for m in 0..2 {
             let match_val = self.timer[i].match_val[m];
             let crossed = if overflow {
@@ -294,19 +321,44 @@ impl GeneralTimers {
                 match_val > old && match_val <= new
             };
             if crossed {
-                self.status |= 1 << (i * 3 + m);
+                status |= 1 << (i * 3 + m);
             }
         }
+        status
     }
 
-    /// Check match conditions when counting down
-    fn check_matches_down(&mut self, i: usize, old: u32, new: u32) {
+    /// Check match conditions when counting down, returning status bits (not setting self.status)
+    fn check_matches_down_bits(&self, i: usize, old: u32, new: u32) -> u32 {
+        let mut status = 0u32;
         for m in 0..2 {
             let match_val = self.timer[i].match_val[m];
             if match_val >= new && match_val < old {
-                self.status |= 1 << (i * 3 + m);
+                status |= 1 << (i * 3 + m);
             }
         }
+        status
+    }
+
+    /// Process one tier of delayed timer interrupts (CEmu: gpt_delay).
+    /// Returns (status_bits_applied, interrupt_mask, has_more_pending).
+    /// The interrupt_mask has bit i set if timer i should raise an interrupt.
+    pub fn process_delay(&mut self) -> (u32, u8, bool) {
+        let status = self.delay_status & 0x1FF; // Low 9 bits = current tier
+        let intrpt = (self.delay_intrpt & 0x07) as u8;  // Low 3 bits = current tier
+
+        self.status |= status;
+
+        self.delay_status >>= 9;
+        // Check has_more before shifting delay_intrpt (matches CEmu's gpt_delay)
+        let has_more = self.delay_status != 0 || self.delay_intrpt != 0;
+        self.delay_intrpt >>= 3;
+
+        (status, intrpt, has_more)
+    }
+
+    /// Check if delay pipeline has pending data that needs scheduling
+    pub fn needs_delay_schedule(&self) -> bool {
+        self.delay_status != 0 || self.delay_intrpt != 0
     }
 
     // ========== Accessors for snapshot/state persistence ==========
@@ -461,8 +513,9 @@ mod tests {
         gpt.control = 0x01; // enable timer 0
         gpt.timer[0].counter = 0;
 
-        let fired = gpt.tick(100, 3);
-        assert_eq!(fired, 0); // No interrupts
+        let fired = gpt.tick(100, 3, 0);
+        assert_eq!(fired, 0); // No interrupts (deferred through delay pipeline)
+        assert!(!gpt.needs_delay_event); // No match/overflow occurred
         assert_eq!(gpt.timer[0].counter, 100);
     }
 
@@ -473,23 +526,45 @@ mod tests {
         gpt.control = 0x01 | (1 << 9); // enable + direction invert
         gpt.timer[0].counter = 100;
 
-        let fired = gpt.tick(50, 3);
+        let fired = gpt.tick(50, 3, 0);
         assert_eq!(fired, 0);
         assert_eq!(gpt.timer[0].counter, 50);
     }
 
+    /// Helper: process all delay tiers, collecting combined status and intrpt
+    fn drain_delay(gpt: &mut GeneralTimers) -> (u32, u8) {
+        let mut combined_status = 0u32;
+        let mut combined_intrpt = 0u8;
+        loop {
+            let (status, intrpt, has_more) = gpt.process_delay();
+            combined_status |= status;
+            combined_intrpt |= intrpt;
+            if !has_more {
+                break;
+            }
+        }
+        (combined_status, combined_intrpt)
+    }
+
     #[test]
-    fn test_tick_overflow_sets_status() {
+    fn test_tick_overflow_sets_delay_pipeline() {
         let mut gpt = GeneralTimers::new();
         // Enable timer 0, count up, auto-reload
         gpt.control = 0x01 | (1 << 2); // enable + overflow enable
         gpt.timer[0].counter = 0xFFFFFFFE;
         gpt.mask = 0x04; // Mask timer 0 overflow bit
 
-        let fired = gpt.tick(3, 3);
-        // Should have overflowed
-        assert_ne!(gpt.status & 0x04, 0); // Overflow bit set
-        assert_ne!(fired, 0); // Interrupt fired
+        gpt.tick(3, 3, 0);
+        // Should have overflowed — status bits are in delay pipeline, not status register yet
+        assert_eq!(gpt.status & 0x04, 0); // NOT set directly
+        assert!(gpt.needs_delay_event); // Delay pipeline has pending data
+        assert!(gpt.needs_delay_schedule());
+
+        // Process all delay pipeline tiers
+        let (status, intrpt) = drain_delay(&mut gpt);
+        assert_ne!(status & 0x04, 0); // Overflow bit applied
+        assert_ne!(gpt.status & 0x04, 0); // Status register updated
+        assert_ne!(intrpt & 0x01, 0); // Timer 0 interrupt bit set
     }
 
     #[test]
@@ -500,7 +575,7 @@ mod tests {
         gpt.timer[0].counter = 5;
         gpt.timer[0].reset = 1000;
 
-        gpt.tick(10, 3);
+        gpt.tick(10, 3, 0);
         // 5 ticks to reach 0, reload to 1000, 5 more ticks down
         assert_eq!(gpt.timer[0].counter, 995);
     }
@@ -511,13 +586,13 @@ mod tests {
         gpt.timer[0].counter = 100;
         // Timer 0 not enabled
 
-        let fired = gpt.tick(50, 3);
+        let fired = gpt.tick(50, 3, 0);
         assert_eq!(fired, 0);
         assert_eq!(gpt.timer[0].counter, 100);
     }
 
     #[test]
-    fn test_match_interrupt() {
+    fn test_match_interrupt_via_delay() {
         let mut gpt = GeneralTimers::new();
         // Enable timer 0, count up
         gpt.control = 0x01;
@@ -525,8 +600,57 @@ mod tests {
         gpt.timer[0].match_val[0] = 50;
         gpt.mask = 0x01; // Mask match0 for timer 0
 
-        let fired = gpt.tick(60, 3);
-        assert_ne!(gpt.status & 0x01, 0); // Match0 bit set
-        assert_ne!(fired, 0);
+        gpt.tick(60, 3, 0);
+        // Match detected — packed into delay pipeline
+        assert!(gpt.needs_delay_event);
+
+        // Process all delay tiers
+        let (status, intrpt) = drain_delay(&mut gpt);
+        assert_ne!(status & 0x01, 0); // Match0 bit applied
+        assert_ne!(gpt.status & 0x01, 0); // Status register updated
+        assert_ne!(intrpt & 0x01, 0); // Timer 0 interrupt
+    }
+
+    #[test]
+    fn test_delay_pipeline_tiers() {
+        let mut gpt = GeneralTimers::new();
+        // Enable timer 0, count up
+        gpt.control = 0x01;
+        gpt.timer[0].counter = 0;
+        gpt.timer[0].match_val[0] = 10;
+
+        // First tick: delay_remaining=0 (not active), packs into tier for delay=2
+        gpt.tick(20, 3, 0);
+        assert!(gpt.needs_delay_event);
+        assert!(gpt.needs_delay_schedule());
+
+        // Drain all tiers — status and interrupt should both be present
+        let (status, intrpt) = drain_delay(&mut gpt);
+        assert_ne!(status, 0); // Match0 for timer 0
+        assert_ne!(intrpt, 0); // Timer 0 interrupt
+    }
+
+    #[test]
+    fn test_delay_pipeline_multiple_timers() {
+        let mut gpt = GeneralTimers::new();
+        // Enable all 3 timers, count up
+        gpt.control = 0x01 | 0x08 | 0x40; // enable bits for timer 0, 1, 2
+        gpt.timer[0].counter = 0;
+        gpt.timer[0].match_val[0] = 10;
+        gpt.timer[1].counter = 0;
+        gpt.timer[1].match_val[0] = 15;
+        gpt.timer[2].counter = 0;
+        gpt.timer[2].match_val[1] = 20;
+
+        // Tick all timers past their match values
+        gpt.tick(25, 3, 0);
+        assert!(gpt.needs_delay_event);
+
+        // Drain all tiers — all 3 timers should have fired
+        let (status, intrpt) = drain_delay(&mut gpt);
+        assert_ne!(status & 0x01, 0); // Timer 0 match0
+        assert_ne!(status & 0x08, 0); // Timer 1 match0
+        assert_ne!(status & 0x80, 0); // Timer 2 match1
+        assert_eq!(intrpt & 0x07, 0x07); // All 3 timer interrupts
     }
 }
