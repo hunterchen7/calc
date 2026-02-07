@@ -86,15 +86,15 @@
 
 ---
 
-## Phase 6: LCD & SPI Enhancements — [partial]
+## Phase 6: LCD & SPI Enhancements — [x]
 **Effort: L | Risk: Low**
 
 - [x] **6A** Fix ICR register (`peripherals/lcd.rs`) — offset 0x28 = interrupt clear (not PALBASE), IMSC/RIS as u8, MIS at 0x24, UPCURR/LPCURR, peripheral ID at 0xFE0
 - [x] **6B** Add palette storage — 256 entries at 0x200-0x3FF (512 bytes), UPBASE/LPBASE 8-byte alignment
 - [x] **6C** Basic LCD DMA engine — 5-state event machine (FRONT_PORCH→SYNC→LNBU→BACK_PORCH→ACTIVE_VIDEO), DMA prefill + active phases, UPCURR advancement, CLOCK_24M events + CLOCK_48M DMA, timing parameter extraction, enable/disable scheduling flags
-- [ ] **6D** SPI panel stub — deferred (ST7789V is 1375 lines in CEmu, complex)
+- [x] **6D** SPI panel stub — minimal ST7789V stub absorbing 9-bit SPI frames, command/data parsing, register storage (MADCTL, COLMOD, CASET, RASET), TX data FIFO in SPI controller, panel wired into transfer completion
 
-**Verify**: Boot passes (156.10M cycles, PC=085B80). 270/455 tests pass (178 pre-existing failures). 6D deferred.
+**Verify**: Boot passes (156.10M cycles, PC=085B80). 277/455 tests pass (178 pre-existing failures).
 
 ---
 
@@ -120,7 +120,7 @@
 | 3 | Peripheral Registers | **Done** | — |
 | 4 | Scheduler & Timing | **Done** | — |
 | 5 | RTC/SHA256/Control | **Done** | — |
-| 6 | LCD & SPI | Partial | 6D (SPI panel) |
+| 6 | LCD & SPI | **Done** | — |
 | 7 | CPU Advanced & Bus | Partial | 7D (DMA scheduling) |
 
-Boot passes at PC=085B80 with 156.10M cycles. 270/455 tests pass (178 pre-existing failures). Remaining deferred: 6D (SPI panel), 7D (DMA scheduling).
+Boot passes at PC=085B80 with 156.10M cycles. 277/455 tests pass (178 pre-existing failures). Remaining deferred: 7D (DMA scheduling).

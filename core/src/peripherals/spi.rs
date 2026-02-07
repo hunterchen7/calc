@@ -4,6 +4,11 @@
 //!
 //! This is a minimal implementation for boot parity with CEmu.
 //! Timing is based on CPU cycles with a 24 MHz SPI clock model.
+//!
+//! The SPI bus connects to the ST7789V LCD panel via 9-bit frames.
+//! When a transfer completes, TX data is forwarded to the panel stub.
+
+use super::panel::PanelStub;
 
 /// SPI FIFO depth (matches CEmu)
 const SPI_RXFIFO_DEPTH: u8 = 16;
@@ -28,16 +33,24 @@ pub struct SpiController {
     int_status: u32,
     /// TX FIFO valid entries (number of pending transfers)
     tfve: u8,
-    /// TX FIFO index
+    /// TX FIFO write index (where next write goes)
+    tfwi: u8,
+    /// TX FIFO read index (where next transfer reads from)
     tfvi: u8,
     /// RX FIFO valid entries
     rfve: u8,
     /// RX FIFO index
     rfvi: u8,
+    /// TX data FIFO (stores actual values written to DATA register)
+    tx_fifo: [u32; SPI_TXFIFO_DEPTH as usize],
+    /// Data being transferred in the current SPI frame
+    current_tx_data: u32,
     /// Transfer bits remaining
     transfer_bits: u8,
     /// Cycle when the current transfer completes
     next_event_cycle: Option<u64>,
+    /// ST7789V LCD panel connected via SPI
+    panel: PanelStub,
 }
 
 impl SpiController {
@@ -53,17 +66,26 @@ impl SpiController {
             int_ctrl: 0,
             int_status: 0,
             tfve: 0,
+            tfwi: 0,
             tfvi: 0,
             rfve: 0,
             rfvi: 0,
+            tx_fifo: [0; SPI_TXFIFO_DEPTH as usize],
+            current_tx_data: 0,
             transfer_bits: 0,
             next_event_cycle: None,
+            panel: PanelStub::new(),
         }
     }
 
-    /// Reset the SPI controller
+    /// Reset the SPI controller (including panel)
     pub fn reset(&mut self) {
         *self = Self::new();
+    }
+
+    /// Get a reference to the panel stub
+    pub fn panel(&self) -> &PanelStub {
+        &self.panel
     }
 
     /// True if SPI is enabled (CR2 bit 0)
@@ -155,8 +177,13 @@ impl SpiController {
 
         let queued_before = self.tfve;
         if tx_available {
+            // Read TX data from FIFO before consuming
+            let fifo_idx = (self.tfvi & (SPI_TXFIFO_DEPTH - 1)) as usize;
+            self.current_tx_data = self.tx_fifo[fifo_idx];
             self.tfve = self.tfve.saturating_sub(1);
             self.tfvi = self.tfvi.wrapping_add(1);
+        } else {
+            self.current_tx_data = 0;
         }
         self.transfer_bits = self.transfer_bit_count();
 
@@ -167,7 +194,7 @@ impl SpiController {
 
         if Self::trace_enabled() {
             eprintln!(
-                "[spi] start cycle={} next={} queued_before={} queued_after={} bits={} divider={} tx={} rx={} flash={}",
+                "[spi] start cycle={} next={} queued_before={} queued_after={} bits={} divider={} tx={} rx={} flash={} data=0x{:03X}",
                 base_cycle,
                 next_cycle,
                 queued_before,
@@ -176,7 +203,8 @@ impl SpiController {
                 (self.cr1 & 0xFFFF) + 1,
                 tx_enabled as u8,
                 rx_enabled as u8,
-                self.flash_enabled() as u8
+                self.flash_enabled() as u8,
+                self.current_tx_data
             );
         }
 
@@ -205,6 +233,9 @@ impl SpiController {
                     self.transfer_bits
                 );
             }
+
+            // Forward TX data to panel on transfer completion
+            self.panel.transfer(self.current_tx_data);
 
             self.transfer_bits = 0;
             self.next_event_cycle = None;
@@ -345,6 +376,7 @@ impl SpiController {
                 }
                 // Bit 3: Reset TX FIFO
                 if masked_value & (1 << 3) != 0 {
+                    self.tfwi = 0;
                     self.tfvi = 0;
                     self.tfve = 0;
                 }
@@ -369,15 +401,28 @@ impl SpiController {
             }
             // DATA (0x18-0x1B) - writing adds to TX FIFO
             6 => {
+                // Accumulate bytes into current FIFO entry (CEmu: spi.txFifo[idx] |= value << shift)
+                if self.tfve < SPI_TXFIFO_DEPTH {
+                    let fifo_idx = (self.tfwi & (SPI_TXFIFO_DEPTH - 1)) as usize;
+                    if shift == 0 {
+                        // First byte clears the entry
+                        self.tx_fifo[fifo_idx] = value32;
+                    } else {
+                        self.tx_fifo[fifo_idx] |= value32;
+                    }
+                }
                 if shift == 0 && self.tfve < SPI_TXFIFO_DEPTH {
-                    // Add to TX FIFO (only on byte 0 write)
+                    // Commit entry on byte 0 write
                     self.tfve += 1;
+                    self.tfwi = self.tfwi.wrapping_add(1);
                     state_changed = true; // May need to start transfer
                     if Self::trace_enabled() {
+                        let fifo_idx = ((self.tfwi.wrapping_sub(1)) & (SPI_TXFIFO_DEPTH - 1)) as usize;
                         eprintln!(
-                            "[spi] data write tfve={} cr2=0x{:03X}",
+                            "[spi] data write tfve={} cr2=0x{:03X} data=0x{:08X}",
                             self.tfve,
-                            self.cr2
+                            self.cr2,
+                            self.tx_fifo[fifo_idx]
                         );
                     }
                 }
@@ -399,14 +444,18 @@ impl SpiController {
     pub fn complete_transfer_and_continue(&mut self) -> Option<u64> {
         if Self::trace_enabled() {
             eprintln!(
-                "[spi] sched_complete queued={} transfer_bits={}",
+                "[spi] sched_complete queued={} transfer_bits={} tx_data=0x{:03X}",
                 self.tfve,
-                self.transfer_bits
+                self.transfer_bits,
+                self.current_tx_data
             );
         }
 
         // Complete current transfer
         if self.transfer_bits != 0 {
+            // Forward TX data to the panel (CEmu: panel_transfer(spi.txFifo[idx]))
+            self.panel.transfer(self.current_tx_data);
+
             self.transfer_bits = 0;
             self.next_event_cycle = None;
 
@@ -451,8 +500,12 @@ impl SpiController {
         // Consume from TX FIFO
         let queued_before = self.tfve;
         if tx_available {
+            let fifo_idx = (self.tfvi & (SPI_TXFIFO_DEPTH - 1)) as usize;
+            self.current_tx_data = self.tx_fifo[fifo_idx];
             self.tfve = self.tfve.saturating_sub(1);
             self.tfvi = self.tfvi.wrapping_add(1);
+        } else {
+            self.current_tx_data = 0;
         }
 
         self.transfer_bits = self.transfer_bit_count();
@@ -463,13 +516,14 @@ impl SpiController {
 
         if Self::trace_enabled() {
             eprintln!(
-                "[spi] sched_start queued_before={} queued_after={} bits={} ticks={} tx={} rx={}",
+                "[spi] sched_start queued_before={} queued_after={} bits={} ticks={} tx={} rx={} data=0x{:03X}",
                 queued_before,
                 self.tfve,
                 self.transfer_bits,
                 ticks,
                 tx_enabled as u8,
-                rx_enabled as u8
+                rx_enabled as u8,
+                self.current_tx_data
             );
         }
 

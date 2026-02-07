@@ -16,6 +16,7 @@ pub mod flash;
 pub mod interrupt;
 pub mod keypad;
 pub mod lcd;
+pub mod panel;
 pub mod rtc;
 pub mod sha256;
 pub mod spi;
