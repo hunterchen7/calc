@@ -284,6 +284,9 @@ pub struct Emu {
     /// Whether TI-OS expression parser has been initialized after boot
     /// See docs/findings.md "TI-OS Expression Parser Requires Initialization After Boot"
     boot_init_done: bool,
+    /// Frame counter for periodic diagnostic logging
+    #[cfg(not(target_arch = "wasm32"))]
+    frame_count: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,6 +324,8 @@ impl Emu {
             total_cycles: 0,
             halt_logged: false,
             boot_init_done: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            frame_count: 0,
         }
     }
 
@@ -502,33 +507,128 @@ impl Emu {
             // CEmu HALT fast-forward: when halted, advance cycles to next scheduled event.
             // This matches CEmu's cpu_halt() which sets cpu.cycles = cpu.next.
             // We must do this AFTER processing scheduler events above, so we know what's next.
+            //
+            // Performance: LCD DMA fires every ~19 cycles at Clock48M, creating thousands
+            // of events per frame. Instead of returning to the outer loop for each event
+            // (which requires cpu.step + tick_peripherals overhead), we use a tight inner
+            // loop that only processes scheduler events and DMA stealing. Peripheral ticks
+            // (OS Timer, keypad, etc.) are batched every HALT_TICK_BATCH cycles.
             if self.cpu.halted {
                 self.last_stop = StopReason::Halted;
-                let skip = self.scheduler.cycles_until_next_event();
-                if skip > 0 {
-                    // Cap skip to prevent i32 overflow and ensure we exit the loop
+                const HALT_TICK_BATCH: u64 = 10_000;
+                let mut peripheral_debt: u64 = 0;
+
+                loop {
+                    let skip = self.scheduler.cycles_until_next_event();
+                    if skip == 0 {
+                        if !self.cpu.iff1 && !self.cpu.nmi_pending {
+                            log_evt!(
+                                "HALT_STUCK: pc={:06X} iff1={} iff2={} irq={} nmi={} cycles_left={} total={}",
+                                self.cpu.pc, self.cpu.iff1, self.cpu.iff2,
+                                self.cpu.irq_pending, self.cpu.nmi_pending,
+                                cycles_remaining, self.total_cycles
+                            );
+                            break; // Nothing can wake the CPU
+                        }
+                        // iff1 is true but no events — need tick_peripherals to
+                        // advance the OS Timer which may generate an interrupt.
+                        // Advance one batch worth so the OS Timer can fire.
+                        let batch = HALT_TICK_BATCH.min(cycles_remaining.max(0) as u64);
+                        if batch == 0 { break; }
+                        self.bus.add_cycles(batch);
+                        cycles_remaining -= batch as i32;
+                        self.scheduler.advance(batch);
+                        self.total_cycles = self.bus.total_cycles();
+                        if self.tick_peripherals(batch as u32) {
+                            self.cpu.irq_pending = true;
+                            break; // Interrupt will wake CPU on next step()
+                        }
+                        continue;
+                    }
+
                     let skip = skip.min(cycles_remaining.max(0) as u64);
-                    // Fast-forward bus cycles and advance scheduler
+                    if skip == 0 { break; }
+
                     self.bus.add_cycles(skip);
                     cycles_remaining -= skip as i32;
-                    self.total_cycles = self.bus.total_cycles();
                     self.scheduler.advance(skip);
-                    // Process any events that just fired
+                    self.total_cycles = self.bus.total_cycles();
+
+                    // Process events (DMA, LCD state machine, timers, etc.)
                     self.process_scheduler_events();
-                    // Tick peripherals with skipped cycles so OS timer/LCD/etc. advance
-                    if self.tick_peripherals(skip as u32) {
+
+                    // DMA cycle stealing
+                    let dma_stolen = self.process_dma_stealing();
+                    if dma_stolen > 0 {
+                        cycles_remaining -= dma_stolen as i32;
+                    }
+
+                    peripheral_debt += skip + dma_stolen;
+
+                    // Periodically tick peripherals (OS Timer, keypad, etc.)
+                    if peripheral_debt >= HALT_TICK_BATCH {
+                        if self.tick_peripherals(peripheral_debt as u32) {
+                            self.cpu.irq_pending = true;
+                        }
+                        peripheral_debt = 0;
+                    }
+
+                    // Check wake conditions
+                    if self.cpu.irq_pending && self.cpu.iff1 { break; }
+                    if self.cpu.nmi_pending { break; }
+                    if cycles_remaining <= 0 { break; }
+                }
+
+                // Flush any remaining peripheral debt
+                if peripheral_debt > 0 {
+                    if self.tick_peripherals(peripheral_debt as u32) {
                         self.cpu.irq_pending = true;
                     }
-                } else if !self.cpu.iff1 && !self.cpu.nmi_pending {
-                    // No events scheduled and interrupts disabled — nothing can wake the CPU.
-                    // Break to avoid spinning 1 cycle at a time through all remaining cycles.
-                    break;
                 }
             }
         }
 
         self.last_stop = StopReason::CyclesComplete;
-        (self.total_cycles - start_cycles) as u32
+        let executed = (self.total_cycles - start_cycles) as u32;
+
+        // Periodic frame diagnostic logging (non-WASM only)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.frame_count += 1;
+            // Detect stuck-in-ISR: low PC, iff1=false, not halted, actively running
+            let is_stuck_isr = !self.cpu.halted && !self.cpu.iff1 && self.cpu.iff2
+                && self.cpu.pc < 0x002000;
+            // Log every 60 frames (~1 second) or when CPU is stuck
+            let is_stuck_halt = self.cpu.halted && !self.cpu.iff1;
+            if self.frame_count % 60 == 0 || is_stuck_halt || is_stuck_isr {
+                let active_events = self.scheduler.active_event_names();
+                let pending_irqs = self.bus.ports.interrupt.pending_source_names();
+                let raw_irqs = self.bus.ports.interrupt.raw();
+                let status_irqs = self.bus.ports.interrupt.status();
+                let enabled_irqs = self.bus.ports.interrupt.enabled();
+                log_evt!(
+                    "FRAME[{}]: pc={:06X} halted={} iff1={} iff2={} irq={} nmi={} executed={}/{} total={} events=[{}] pending=[{}] raw={:05X} status={:05X} enabled={:05X} SP={:06X}",
+                    self.frame_count, self.cpu.pc,
+                    self.cpu.halted, self.cpu.iff1, self.cpu.iff2,
+                    self.cpu.irq_pending, self.cpu.nmi_pending,
+                    executed, cycles, self.total_cycles,
+                    active_events, pending_irqs,
+                    raw_irqs, status_irqs, enabled_irqs,
+                    self.cpu.sp()
+                );
+            }
+            // One-shot: dump execution history when first entering stuck-ISR state
+            if is_stuck_isr && self.frame_count > 120 {
+                // Only dump once (use halt_logged as a one-shot flag)
+                if !self.halt_logged {
+                    self.halt_logged = true;
+                    log_evt!("STUCK_ISR_HISTORY: {}", self.dump_history());
+                    log_evt!("STUCK_ISR_REGS: {}", self.dump_registers());
+                }
+            }
+        }
+
+        executed
     }
 
     /// Internal run_cycles without boot initialization check (to avoid recursion)
@@ -585,21 +685,60 @@ impl Emu {
                 self.cpu.irq_pending = true;
             }
 
-            // HALT fast-forward: advance to next scheduled event
+            // HALT fast-forward (same batched approach as run_cycles)
             if self.cpu.halted {
-                let skip = self.scheduler.cycles_until_next_event();
-                if skip > 0 {
+                const HALT_TICK_BATCH: u64 = 10_000;
+                let mut peripheral_debt: u64 = 0;
+
+                loop {
+                    let skip = self.scheduler.cycles_until_next_event();
+                    if skip == 0 {
+                        if !self.cpu.iff1 && !self.cpu.nmi_pending { break; }
+                        let batch = HALT_TICK_BATCH.min(cycles_remaining.max(0) as u64);
+                        if batch == 0 { break; }
+                        self.bus.add_cycles(batch);
+                        cycles_remaining -= batch as i32;
+                        self.scheduler.advance(batch);
+                        self.total_cycles = self.bus.total_cycles();
+                        if self.tick_peripherals(batch as u32) {
+                            self.cpu.irq_pending = true;
+                            break;
+                        }
+                        continue;
+                    }
+
                     let skip = skip.min(cycles_remaining.max(0) as u64);
+                    if skip == 0 { break; }
+
                     self.bus.add_cycles(skip);
                     cycles_remaining -= skip as i32;
-                    self.total_cycles = self.bus.total_cycles();
                     self.scheduler.advance(skip);
+                    self.total_cycles = self.bus.total_cycles();
                     self.process_scheduler_events();
-                    if self.tick_peripherals(skip as u32) {
+
+                    let dma_stolen = self.process_dma_stealing();
+                    if dma_stolen > 0 {
+                        cycles_remaining -= dma_stolen as i32;
+                    }
+
+                    peripheral_debt += skip + dma_stolen;
+
+                    if peripheral_debt >= HALT_TICK_BATCH {
+                        if self.tick_peripherals(peripheral_debt as u32) {
+                            self.cpu.irq_pending = true;
+                        }
+                        peripheral_debt = 0;
+                    }
+
+                    if self.cpu.irq_pending && self.cpu.iff1 { break; }
+                    if self.cpu.nmi_pending { break; }
+                    if cycles_remaining <= 0 { break; }
+                }
+
+                if peripheral_debt > 0 {
+                    if self.tick_peripherals(peripheral_debt as u32) {
                         self.cpu.irq_pending = true;
                     }
-                } else if !self.cpu.iff1 && !self.cpu.nmi_pending {
-                    break;
                 }
             }
         }
@@ -701,18 +840,56 @@ impl Emu {
             self.cpu.irq_pending = true;
         }
 
-        // HALT fast-forward: advance to next scheduled event
+        // HALT fast-forward: advance to next scheduled event (batched for DMA efficiency)
         if self.cpu.halted {
             self.last_stop = StopReason::Halted;
-            let skip = self.scheduler.cycles_until_next_event();
-            if skip > 0 {
-                // Cap to a reasonable amount for single-step mode
-                let skip = skip.min(10_000_000);
+            const HALT_TICK_BATCH: u64 = 10_000;
+            const STEP_HALT_CAP: u64 = 10_000_000;
+            let mut total_advanced: u64 = 0;
+            let mut peripheral_debt: u64 = 0;
+
+            loop {
+                let skip = self.scheduler.cycles_until_next_event();
+                if skip == 0 {
+                    if !self.cpu.iff1 && !self.cpu.nmi_pending { break; }
+                    let batch = HALT_TICK_BATCH.min(STEP_HALT_CAP - total_advanced);
+                    if batch == 0 { break; }
+                    self.bus.add_cycles(batch);
+                    self.scheduler.advance(batch);
+                    self.total_cycles = self.bus.total_cycles();
+                    total_advanced += batch;
+                    if self.tick_peripherals(batch as u32) {
+                        self.cpu.irq_pending = true;
+                        break;
+                    }
+                    continue;
+                }
+
+                let skip = skip.min(STEP_HALT_CAP - total_advanced);
+                if skip == 0 { break; }
+
                 self.bus.add_cycles(skip);
-                self.total_cycles = self.bus.total_cycles();
                 self.scheduler.advance(skip);
+                self.total_cycles = self.bus.total_cycles();
+                total_advanced += skip;
                 self.process_scheduler_events();
-                if self.tick_peripherals(skip as u32) {
+                self.process_dma_stealing();
+
+                peripheral_debt += skip;
+                if peripheral_debt >= HALT_TICK_BATCH {
+                    if self.tick_peripherals(peripheral_debt as u32) {
+                        self.cpu.irq_pending = true;
+                    }
+                    peripheral_debt = 0;
+                }
+
+                if self.cpu.irq_pending && self.cpu.iff1 { break; }
+                if self.cpu.nmi_pending { break; }
+                if total_advanced >= STEP_HALT_CAP { break; }
+            }
+
+            if peripheral_debt > 0 {
+                if self.tick_peripherals(peripheral_debt as u32) {
                     self.cpu.irq_pending = true;
                 }
             }
@@ -804,20 +981,19 @@ impl Emu {
                 }
                 EventId::TimerDelay => {
                     // Timer 2-cycle delay pipeline: process one tier of deferred interrupts
-                    let (_status, intrpt, has_more) = self.bus.ports.timers.process_delay();
-                    // Raise interrupts for each timer that has pending bits
-                    for i in 0..3 {
-                        if intrpt & (1 << i) != 0 {
-                            let source = match i {
-                                0 => sources::TIMER1,
-                                1 => sources::TIMER2,
-                                2 => sources::TIMER3,
-                                _ => unreachable!(),
-                            };
-                            self.bus.ports.interrupt.raise(source);
-                            self.cpu.irq_pending = true;
+                    let (_status, _intrpt, has_more) = self.bus.ports.timers.process_delay();
+                    // Update interrupt controller based on effective (status & mask)
+                    // This matches CEmu: intrpt_set(INT_TIMERn, (status & mask) & bits)
+                    let int_state = self.bus.ports.timers.interrupt_state();
+                    let timer_sources = [sources::TIMER1, sources::TIMER2, sources::TIMER3];
+                    for (i, &src) in timer_sources.iter().enumerate() {
+                        if int_state & (1 << i) != 0 {
+                            self.bus.ports.interrupt.raise(src);
+                        } else {
+                            self.bus.ports.interrupt.clear_raw(src);
                         }
                     }
+                    self.cpu.irq_pending = self.bus.ports.interrupt.irq_pending();
                     if has_more {
                         // More tiers pending — reschedule for 1 more CPU cycle
                         self.scheduler.set(EventId::TimerDelay, 1);
@@ -825,23 +1001,19 @@ impl Emu {
                         self.scheduler.clear(EventId::TimerDelay);
                     }
                 }
-                EventId::Timer0 => {
-                    // Timer 0 fired - raise TIMER1 interrupt (timers are 1-indexed in interrupt controller)
-                    self.bus.ports.interrupt.raise(sources::TIMER1);
+                EventId::Timer0 | EventId::Timer1 | EventId::Timer2 => {
+                    // Timer fired — update all timer interrupts based on (status & mask)
+                    let int_state = self.bus.ports.timers.interrupt_state();
+                    let timer_sources = [sources::TIMER1, sources::TIMER2, sources::TIMER3];
+                    for (i, &src) in timer_sources.iter().enumerate() {
+                        if int_state & (1 << i) != 0 {
+                            self.bus.ports.interrupt.raise(src);
+                        } else {
+                            self.bus.ports.interrupt.clear_raw(src);
+                        }
+                    }
                     self.cpu.irq_pending = self.bus.ports.interrupt.irq_pending();
-                    self.scheduler.clear(EventId::Timer0);
-                }
-                EventId::Timer1 => {
-                    // Timer 1 fired - raise TIMER2 interrupt
-                    self.bus.ports.interrupt.raise(sources::TIMER2);
-                    self.cpu.irq_pending = self.bus.ports.interrupt.irq_pending();
-                    self.scheduler.clear(EventId::Timer1);
-                }
-                EventId::Timer2 => {
-                    // Timer 2 fired - raise TIMER3 interrupt
-                    self.bus.ports.interrupt.raise(sources::TIMER3);
-                    self.cpu.irq_pending = self.bus.ports.interrupt.irq_pending();
-                    self.scheduler.clear(EventId::Timer2);
+                    self.scheduler.clear(event);
                 }
                 EventId::OsTimer => {
                     // OS Timer fired - raise OSTIMER interrupt

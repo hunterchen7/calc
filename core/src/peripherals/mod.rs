@@ -254,7 +254,21 @@ impl Peripherals {
             a if a >= INT_BASE && a < INT_END => self.interrupt.write(a - INT_BASE, value),
 
             // Timers (0xF20000 - 0xF2003F)
-            a if a >= TIMER_BASE && a < TIMER_END => self.timers.write(a - TIMER_BASE, value),
+            a if a >= TIMER_BASE && a < TIMER_END => {
+                self.timers.write(a - TIMER_BASE, value);
+                // CEmu: after any timer register write, recalculate interrupt state
+                // for all 3 timers based on (status & mask). This is critical for the
+                // ISR to clear timer interrupts by writing to the status register.
+                let int_state = self.timers.interrupt_state();
+                let timer_sources = [sources::TIMER1, sources::TIMER2, sources::TIMER3];
+                for (i, &src) in timer_sources.iter().enumerate() {
+                    if int_state & (1 << i) != 0 {
+                        self.interrupt.raise(src);
+                    } else {
+                        self.interrupt.clear_raw(src);
+                    }
+                }
+            }
 
             // Keypad Controller (0xF50000 - 0xF5003F)
             a if a >= KEYPAD_BASE && a < KEYPAD_END => {
@@ -317,19 +331,34 @@ impl Peripherals {
         let cpu_speed = self.control.cpu_speed();
         self.timers.tick(cycles, cpu_speed, delay_remaining);
 
+        // Sync timer interrupt state after tick — ensures stale raw bits are cleared
+        // when timers no longer have active status. Without this, timer raw bits
+        // accumulate from scheduler events but are only cleared when the ISR writes
+        // to the timer registers. If the interrupt wasn't enabled, the ISR never ran,
+        // and raw stays permanently set.
+        let int_state = self.timers.interrupt_state();
+        let timer_sources = [sources::TIMER1, sources::TIMER2, sources::TIMER3];
+        for (i, &src) in timer_sources.iter().enumerate() {
+            if int_state & (1 << i) != 0 {
+                self.interrupt.raise(src);
+            } else {
+                self.interrupt.clear_raw(src);
+            }
+        }
+
         // LCD interrupts are now driven by scheduler events (EventId::Lcd / EventId::LcdDma)
         // in emu.rs, matching CEmu's lcd_event()/lcd_dma() architecture.
         // Check LCD scheduling flags set by control register writes.
         // (The actual scheduling is done by emu.rs which checks these flags.)
 
-        // Tick keypad scan timing and raise interrupt if scan/status indicates it
-        if self.keypad.tick(cycles, &self.key_state) {
+        // Tick keypad scan timing and update interrupt state
+        // CEmu calls intrpt_set(INT_KEYPAD, status & enable) which sets OR clears raw
+        let keypad_scan_irq = self.keypad.tick(cycles, &self.key_state);
+        let keypad_any_irq = self.keypad.check_interrupt(&self.key_state);
+        if keypad_scan_irq || keypad_any_irq {
             self.interrupt.raise(sources::KEYPAD);
-        }
-
-        // Check keypad using internal key_state (any-key interrupt in continuous mode)
-        if self.keypad.check_interrupt(&self.key_state) {
-            self.interrupt.raise(sources::KEYPAD);
+        } else {
+            self.interrupt.clear_raw(sources::KEYPAD);
         }
 
         // Tick OS Timer (32KHz crystal-based timer)
@@ -390,9 +419,6 @@ impl Peripherals {
 
             // Toggle state AFTER setting interrupt
             self.os_timer_state = !self.os_timer_state;
-
-            // Only process one state change per tick() call
-            break;
         }
     }
 

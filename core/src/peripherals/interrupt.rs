@@ -186,6 +186,39 @@ impl InterruptController {
         self.banks[0].enabled
     }
 
+    /// Get raw interrupt state (for debugging)
+    pub fn raw(&self) -> u32 {
+        self.raw
+    }
+
+    /// Get human-readable string of pending interrupt sources (status & enabled)
+    pub fn pending_source_names(&self) -> String {
+        let pending0 = self.banks[0].status & self.banks[0].enabled;
+        let pending1 = self.banks[1].status & self.banks[1].enabled;
+        let pending = pending0 | pending1;
+        if pending == 0 {
+            return "none".to_string();
+        }
+        let mut names = Vec::new();
+        if pending & sources::ON_KEY != 0 { names.push("ON"); }
+        if pending & sources::TIMER1 != 0 { names.push("TMR1"); }
+        if pending & sources::TIMER2 != 0 { names.push("TMR2"); }
+        if pending & sources::TIMER3 != 0 { names.push("TMR3"); }
+        if pending & sources::OSTIMER != 0 { names.push("OST"); }
+        if pending & sources::KEYPAD != 0 { names.push("KPD"); }
+        if pending & sources::LCD != 0 { names.push("LCD"); }
+        if pending & sources::PWR != 0 { names.push("PWR"); }
+        if pending & sources::WAKE != 0 { names.push("WAKE"); }
+        // Check for unknown bits
+        let known = sources::ON_KEY | sources::TIMER1 | sources::TIMER2 | sources::TIMER3
+            | sources::OSTIMER | sources::KEYPAD | sources::LCD | sources::PWR | sources::WAKE;
+        let unknown = pending & !known;
+        if unknown != 0 {
+            names.push("UNK");
+        }
+        names.join("+")
+    }
+
     // ========== State Persistence ==========
 
     /// Get status word for a bank (0 or 1)

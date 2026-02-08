@@ -322,6 +322,26 @@ impl Scheduler {
         self.items[event as usize].is_active()
     }
 
+    /// Get a comma-separated list of active event names (for diagnostics)
+    pub fn active_event_names(&self) -> String {
+        let names: Vec<&str> = self.items.iter()
+            .filter(|item| item.is_active())
+            .map(|item| match item.event {
+                EventId::Rtc => "Rtc",
+                EventId::Spi => "Spi",
+                EventId::TimerDelay => "TimerDelay",
+                EventId::Timer0 => "T0",
+                EventId::Timer1 => "T1",
+                EventId::Timer2 => "T2",
+                EventId::OsTimer => "OsTimer",
+                EventId::Lcd => "Lcd",
+                EventId::LcdDma => "LcdDma",
+                EventId::Count => "?",
+            })
+            .collect();
+        names.join(",")
+    }
+
     /// Get ticks remaining until event fires (in the event's clock domain)
     /// Returns 0 if event is not active or has already passed
     pub fn ticks_remaining(&self, event: EventId) -> u64 {

@@ -361,6 +361,18 @@ impl GeneralTimers {
         self.delay_status != 0 || self.delay_intrpt != 0
     }
 
+    /// Returns which timer interrupts should be active based on current status & mask.
+    /// Bit 0 = timer 0 (TIMER1 source), bit 1 = timer 1, bit 2 = timer 2.
+    /// Matches CEmu: intrpt_set(INT_TIMERn, (gpt.status & gpt.mask) & timer_bits)
+    pub fn interrupt_state(&self) -> u8 {
+        let effective = self.status & self.mask;
+        let mut result = 0u8;
+        if effective & 0x007 != 0 { result |= 1; } // Timer 0 has status bits 0-2
+        if effective & 0x038 != 0 { result |= 2; } // Timer 1 has status bits 3-5
+        if effective & 0x1C0 != 0 { result |= 4; } // Timer 2 has status bits 6-8
+        result
+    }
+
     // ========== Accessors for snapshot/state persistence ==========
 
     pub fn counter(&self, index: usize) -> u32 {

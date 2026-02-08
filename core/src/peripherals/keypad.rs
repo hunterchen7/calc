@@ -267,10 +267,7 @@ impl KeypadController {
             self.status |= status::ANY_KEY;
         }
 
-        crate::emu::log_evt!(
-            "KEYPAD_SCAN_DONE: mode={} any_key={} data_changed={}",
-            self.mode(), self.any_key_in_scan, self.data_changed_in_scan
-        );
+        // Scan done logging removed to reduce log noise
 
         // Save current data as previous for next comparison
         self.prev_scan_data = self.data;
@@ -314,8 +311,7 @@ impl KeypadController {
             return false;
         }
 
-        // Scan activity logging (no-op in WASM)
-        crate::emu::log_evt!("KEYPAD_SCAN: active, mode={}, row={}", self.mode(), self.scan_row);
+        // Scan activity logging removed — was generating 9000+ messages per session
 
         let mut cycles_left = cycles;
         let mut interrupt_pending = false;
@@ -345,7 +341,7 @@ impl KeypadController {
                     // Check if any key is pressed in this row
                     if row_data != 0 {
                         self.any_key_in_scan = true;
-                        crate::emu::log_evt!("KEYPAD_SCAN_KEY: row={} data=0x{:04X}", row, row_data);
+                        // Key scan logging removed to reduce log noise
                     }
 
                     // Check if data changed from previous scan cycle
