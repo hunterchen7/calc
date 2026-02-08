@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.res.painterResource
@@ -211,6 +212,10 @@ fun EmulatorScreen(
 
     // Speed control (1x = 800K cycles, adjustable 1-10x)
     var speedMultiplier by remember { mutableStateOf(1f) } // Default 1x (real-time)
+
+    // Display adjustment
+    var calculatorScale by remember { mutableStateOf(1f) }
+    var calculatorYOffset by remember { mutableStateOf(0f) }
 
     // Framebuffer bitmap
     val bitmap = remember {
@@ -429,6 +434,10 @@ fun EmulatorScreen(
             onToggleDebug = { showDebug = !showDebug },
             speedMultiplier = speedMultiplier,
             onSpeedChange = { speedMultiplier = it },
+            calculatorScale = calculatorScale,
+            onScaleChange = { calculatorScale = it },
+            calculatorYOffset = calculatorYOffset,
+            onYOffsetChange = { calculatorYOffset = it },
             lastKeyPress = lastKeyPress,
             logs = logLines,
             currentBackend = currentBackend,
@@ -570,6 +579,10 @@ fun EmulatorView(
     onToggleDebug: () -> Unit,
     speedMultiplier: Float,
     onSpeedChange: (Float) -> Unit,
+    calculatorScale: Float,
+    onScaleChange: (Float) -> Unit,
+    calculatorYOffset: Float,
+    onYOffsetChange: (Float) -> Unit,
     lastKeyPress: String,
     logs: List<String>,
     currentBackend: String,
@@ -698,6 +711,49 @@ fun EmulatorView(
                     )
                 )
 
+                Divider(
+                    modifier = Modifier.padding(vertical = 8.dp),
+                    color = Color(0xFF333344)
+                )
+
+                // Calculator scale
+                Text(
+                    text = "Scale: ${(calculatorScale * 100).toInt()}%",
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+                Slider(
+                    value = calculatorScale,
+                    onValueChange = { onScaleChange(it) },
+                    valueRange = 0.75f..1.25f,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color(0xFF2196F3),
+                        activeTrackColor = Color(0xFF2196F3),
+                        inactiveTrackColor = Color(0xFF333344)
+                    )
+                )
+
+                // Calculator Y offset
+                Text(
+                    text = "Y Offset: ${calculatorYOffset.toInt()}",
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+                Slider(
+                    value = calculatorYOffset,
+                    onValueChange = { onYOffsetChange(it) },
+                    valueRange = -150f..150f,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color(0xFF2196F3),
+                        activeTrackColor = Color(0xFF2196F3),
+                        inactiveTrackColor = Color(0xFF333344)
+                    )
+                )
+
                 // Backend selection (only if multiple backends available)
                 if (hasMultipleBackends) {
                     Divider(
@@ -777,6 +833,11 @@ fun EmulatorView(
                         .fillMaxWidth()
                         .weight(1f)
                         .aspectRatio(BODY_ASPECT_RATIO)
+                        .graphicsLayer(
+                            scaleX = calculatorScale,
+                            scaleY = calculatorScale
+                        )
+                        .offset(y = calculatorYOffset.dp)
                 ) {
                     // Background: combined calculator body photo
                     Image(

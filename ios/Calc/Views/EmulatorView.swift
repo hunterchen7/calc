@@ -15,6 +15,8 @@ struct EmulatorView: View {
     @State private var showingBackendPicker = false
     @State private var sidebarDragOffset: CGFloat = 0
     @State private var isDraggingToClose = false
+    @State private var calculatorScale: CGFloat = 1.0
+    @State private var calculatorYOffset: CGFloat = 0
 
     private let sidebarWidth: CGFloat = 280
     private let edgeSwipeWidth: CGFloat = 30
@@ -102,6 +104,8 @@ struct EmulatorView: View {
                     )
                 }
             }
+            .scaleEffect(calculatorScale)
+            .offset(y: calculatorYOffset)
     }
 
     /// Edge swipe gesture area for opening the sidebar
@@ -228,6 +232,42 @@ struct EmulatorView: View {
                         step: 0.25
                     )
                     .tint(Color(red: 0.298, green: 0.686, blue: 0.314))
+                    .padding(.horizontal, 16)
+                }
+
+                Divider()
+                    .background(Color(red: 0.2, green: 0.2, blue: 0.267))
+                    .padding(.vertical, 8)
+
+                // Calculator scale
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Scale: \(String(format: "%.0f%%", calculatorScale * 100))")
+                        .font(.system(size: 14))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+
+                    Slider(
+                        value: $calculatorScale,
+                        in: 0.75...1.25,
+                        step: 0.01
+                    )
+                    .tint(Color(red: 0.129, green: 0.588, blue: 0.953))
+                    .padding(.horizontal, 16)
+                }
+
+                // Calculator Y offset
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Y Offset: \(String(format: "%.0f", calculatorYOffset))")
+                        .font(.system(size: 14))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+
+                    Slider(
+                        value: $calculatorYOffset,
+                        in: -150...150,
+                        step: 1
+                    )
+                    .tint(Color(red: 0.129, green: 0.588, blue: 0.953))
                     .padding(.horizontal, 16)
                 }
 
