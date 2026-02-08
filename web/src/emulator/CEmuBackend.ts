@@ -163,9 +163,9 @@ export class CEmuBackend implements EmulatorBackend {
     this.module._emu_keypad_event(row, col, down);
   }
 
-  isDeviceOff(): boolean {
-    // CEmu backend doesn't expose power state yet
-    return false;
+  isLcdOn(): boolean {
+    // CEmu backend doesn't expose LCD state yet — assume on
+    return true;
   }
 
   saveState(): Uint8Array | null {

@@ -29,7 +29,7 @@ export interface EmulatorBackend {
   loadState(data: Uint8Array): boolean;
 
   // State queries
-  isDeviceOff(): boolean;
+  isLcdOn(): boolean;
 
   // Info
   readonly name: string;

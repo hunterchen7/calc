@@ -91,6 +91,22 @@ pub const SCREEN_HEIGHT: usize = 240;
 /// Boot completes at ~62M cycles; we wait a bit longer to ensure TI-OS is ready
 const BOOT_COMPLETE_CYCLES: u64 = 65_000_000;
 
+/// TI-OS Automatic Power Down (APD) disable address.
+///
+/// On a real TI-84 CE, the OS puts the device to sleep after ~5 minutes of
+/// inactivity. In the emulator this is undesirable because:
+///   1. The host device (phone/browser) has its own power/sleep management
+///   2. Without proper APD handling, the emulator flashes or becomes unresponsive
+///
+/// The OS stores APD control in the `apdFlags` byte at (flags + 0x08) = 0xD00088.
+/// Bit 2 (`apdAble`) enables the APD countdown timer. Clearing it prevents the OS
+/// from ever triggering inactivity sleep, while still allowing manual power-off
+/// via 2nd+ON (which writes POWER register bit 6 directly).
+///
+/// Reference: TI-84 CE SDK — flags = 0xD00080, apdFlags = flags + 0x08
+const APD_FLAGS_ADDR: u32 = 0xD00088;
+const APD_ABLE_BIT: u8 = 2;
+
 /// Number of entries in the PC/opcode history ring buffer
 const HISTORY_SIZE: usize = 64;
 
@@ -398,7 +414,7 @@ impl Emu {
     /// screen ("TI-84 Plus CE", OS version, "RAM Cleared") to remain visible until the user
     /// presses their first key. See `set_key()` documentation for details.
     pub fn run_cycles(&mut self, cycles: u32) -> u32 {
-        if !self.rom_loaded || !self.powered_on {
+        if !self.rom_loaded || !self.powered_on || self.is_off() {
             return 0;
         }
 
@@ -507,6 +523,11 @@ impl Emu {
                 self.cpu.irq_pending = true;
             }
 
+            // Stop if device went off (OS wrote POWER bit 6 during this instruction)
+            if self.is_off() {
+                break;
+            }
+
             // CEmu HALT fast-forward: when halted, advance cycles to next scheduled event.
             // This matches CEmu's cpu_halt() which sets cpu.cycles = cpu.next.
             // We must do this AFTER processing scheduler events above, so we know what's next.
@@ -522,6 +543,9 @@ impl Emu {
                 let mut peripheral_debt: u64 = 0;
 
                 loop {
+                    // Stop if device went off during this frame (OS wrote POWER bit 6)
+                    if self.is_off() { break; }
+
                     let skip = self.scheduler.cycles_until_next_event();
                     if skip == 0 {
                         if !self.cpu.iff1 && !self.cpu.nmi_pending {
@@ -1223,6 +1247,7 @@ impl Emu {
             if row == 6 && col == 0 {
                 log_evt!("BOOT_INIT: first key is ENTER, using it to dismiss boot screen");
                 self.boot_init_done = true;
+                self.disable_apd();
                 // Continue to process user's ENTER press below
             } else {
                 log_evt!("BOOT_INIT: first key press detected, auto-dismissing boot screen with ENTER");
@@ -1234,6 +1259,7 @@ impl Emu {
                 self.bus.set_key(6, 0, false);
                 self.run_cycles_internal(3_000_000);
                 self.boot_init_done = true;
+                self.disable_apd();
                 log_evt!("BOOT_INIT: boot screen dismissed, processing user key");
                 // Continue to process the original key press below
             }
@@ -1258,6 +1284,14 @@ impl Emu {
                 self.cpu.any_key_wake = true;
             }
         }
+    }
+
+    /// Disable TI-OS Automatic Power Down (APD) by clearing the `apdAble` flag
+    /// in the OS system flags area. See APD_FLAGS_ADDR constant for details.
+    fn disable_apd(&mut self) {
+        let flags = self.bus.peek_byte(APD_FLAGS_ADDR);
+        self.bus.poke_byte(APD_FLAGS_ADDR, flags & !(1 << APD_ABLE_BIT));
+        log_evt!("APD disabled: apdFlags 0x{:02X} -> 0x{:02X}", flags, flags & !(1 << APD_ABLE_BIT));
     }
 
     /// Get the backlight brightness level (0-255).

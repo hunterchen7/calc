@@ -380,8 +380,8 @@ export function Calculator({
       const width = backend.getFramebufferWidth();
       const height = backend.getFramebufferHeight();
 
-      // Show black screen when device is off (sleeping)
-      if (backend.isDeviceOff()) {
+      // Show black screen when LCD is off (sleeping or disabled)
+      if (!backend.isLcdOn()) {
         ctx.fillStyle = "#000";
         ctx.fillRect(0, 0, width, height);
         return;
