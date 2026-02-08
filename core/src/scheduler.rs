@@ -74,18 +74,22 @@ pub enum EventId {
     Rtc = 0,
     /// SPI transfer completion
     Spi = 1,
+    /// Timer 2-cycle interrupt delay pipeline (CEmu: SCHED_TIMER_DELAY)
+    TimerDelay = 2,
     /// Timer 0
-    Timer0 = 2,
+    Timer0 = 3,
     /// Timer 1
-    Timer1 = 3,
+    Timer1 = 4,
     /// Timer 2
-    Timer2 = 4,
+    Timer2 = 5,
     /// OS Timer
-    OsTimer = 5,
+    OsTimer = 6,
     /// LCD refresh
-    Lcd = 6,
+    Lcd = 7,
+    /// LCD DMA (VRAM read)
+    LcdDma = 8,
     /// Number of event types
-    Count = 7,
+    Count = 9,
 }
 
 /// Bit 63 set indicates event is inactive
@@ -136,6 +140,10 @@ pub struct Scheduler {
     cached_cpu_base_ticks: u64,
     /// Cached earliest event timestamp (avoids scanning all events on every call)
     next_event_ticks: u64,
+    /// DMA state: timestamp of last memory operation completion (base ticks)
+    /// Used by process_pending_dma to track bus contention with LCD DMA.
+    /// CEmu: sched.dma.last_mem_timestamp
+    pub dma_last_mem_timestamp: u64,
 }
 
 impl Scheduler {
@@ -145,16 +153,19 @@ impl Scheduler {
             items: [
                 SchedItem::new(EventId::Rtc, ClockId::Clock32K),
                 SchedItem::new(EventId::Spi, ClockId::Clock24M),
+                SchedItem::new(EventId::TimerDelay, ClockId::Cpu),
                 SchedItem::new(EventId::Timer0, ClockId::Cpu),
                 SchedItem::new(EventId::Timer1, ClockId::Cpu),
                 SchedItem::new(EventId::Timer2, ClockId::Cpu),
                 SchedItem::new(EventId::OsTimer, ClockId::Clock32K),
-                SchedItem::new(EventId::Lcd, ClockId::Panel),
+                SchedItem::new(EventId::Lcd, ClockId::Clock24M),
+                SchedItem::new(EventId::LcdDma, ClockId::Clock48M),
             ],
             base_ticks: 0,
             cpu_speed: 0, // Default 6 MHz
             cached_cpu_base_ticks: ClockId::Cpu.base_ticks_per_tick(0),
             next_event_ticks: u64::MAX,
+            dma_last_mem_timestamp: 0,
         }
     }
 
@@ -172,6 +183,7 @@ impl Scheduler {
         self.cpu_speed = 0;
         self.cached_cpu_base_ticks = ClockId::Cpu.base_ticks_per_tick(0);
         self.next_event_ticks = u64::MAX;
+        self.dma_last_mem_timestamp = 0;
     }
 
     /// Update CPU speed setting
@@ -253,6 +265,9 @@ impl Scheduler {
             }
         }
 
+        // Also adjust DMA timestamp (CEmu: sched_process_pending_dma(0) in sched_second)
+        self.dma_last_mem_timestamp = self.dma_last_mem_timestamp.saturating_sub(SCHED_BASE_CLOCK_RATE);
+
         self.recalc_next_event();
     }
 
@@ -280,6 +295,22 @@ impl Scheduler {
         }
     }
 
+    /// Schedule an event relative to another event's timestamp, using the reference
+    /// event's clock domain. Matches CEmu's `sched_repeat_relative(event, ref, offset, ticks)`.
+    /// `offset` is in the reference event's clock ticks added to ref's timestamp,
+    /// then `ticks` in the target event's own clock ticks are added.
+    pub fn repeat_relative(&mut self, event: EventId, reference: EventId, offset: u64, ticks: u64) {
+        let ref_ts = self.items[reference as usize].timestamp & !INACTIVE_FLAG;
+        let ref_clock = self.items[reference as usize].clock;
+        let ref_base_ticks = ref_clock.base_ticks_per_tick(self.cpu_speed);
+        let event_base_ticks = self.items[event as usize].clock.base_ticks_per_tick(self.cpu_speed);
+        let ts = ref_ts + offset * ref_base_ticks + ticks * event_base_ticks;
+        self.items[event as usize].timestamp = ts;
+        if ts < self.next_event_ticks {
+            self.next_event_ticks = ts;
+        }
+    }
+
     /// Clear/deactivate an event
     pub fn clear(&mut self, event: EventId) {
         self.items[event as usize].deactivate();
@@ -289,6 +320,26 @@ impl Scheduler {
     /// Check if an event is active
     pub fn is_active(&self, event: EventId) -> bool {
         self.items[event as usize].is_active()
+    }
+
+    /// Get a comma-separated list of active event names (for diagnostics)
+    pub fn active_event_names(&self) -> String {
+        let names: Vec<&str> = self.items.iter()
+            .filter(|item| item.is_active())
+            .map(|item| match item.event {
+                EventId::Rtc => "Rtc",
+                EventId::Spi => "Spi",
+                EventId::TimerDelay => "TimerDelay",
+                EventId::Timer0 => "T0",
+                EventId::Timer1 => "T1",
+                EventId::Timer2 => "T2",
+                EventId::OsTimer => "OsTimer",
+                EventId::Lcd => "Lcd",
+                EventId::LcdDma => "LcdDma",
+                EventId::Count => "?",
+            })
+            .collect();
+        names.join(",")
     }
 
     /// Get ticks remaining until event fires (in the event's clock domain)
@@ -361,6 +412,24 @@ impl Scheduler {
         events.into_iter().map(|(e, _)| e).collect()
     }
 
+    /// Get the raw timestamp for a DMA event (for process_pending_dma).
+    /// Returns None if event is not active.
+    pub fn dma_event_timestamp(&self, event: EventId) -> Option<u64> {
+        let item = &self.items[event as usize];
+        if item.is_active() {
+            Some(item.timestamp & !INACTIVE_FLAG)
+        } else {
+            None
+        }
+    }
+
+    /// Convert base ticks to CPU cycles (ceiling division).
+    /// Used by DMA cycle stealing to calculate how many CPU cycles correspond
+    /// to a base tick timestamp.
+    pub fn base_ticks_to_cpu_cycles_ceil(&self, base_ticks: u64) -> u64 {
+        (base_ticks + self.cached_cpu_base_ticks - 1) / self.cached_cpu_base_ticks
+    }
+
     /// Get the number of CPU cycles until the nearest active event fires.
     /// Returns 0 if any event has already fired or no events are active.
     /// Used by the emu loop to fast-forward HALT to the next event (matching CEmu's cpu_halt).
@@ -418,8 +487,8 @@ impl Scheduler {
 
 impl Scheduler {
     /// Size of scheduler state snapshot in bytes
-    /// 8 (base_ticks) + 1 (cpu_speed) + 7*8 (item timestamps) = 65 bytes, round to 72
-    pub const SNAPSHOT_SIZE: usize = 72;
+    /// 8 (base_ticks) + 1 (cpu_speed) + 9*8 (item timestamps) + 8 (dma_last_mem_timestamp) = 89, round to 96
+    pub const SNAPSHOT_SIZE: usize = 96;
 
     /// Save scheduler state to bytes
     pub fn to_bytes(&self) -> [u8; Self::SNAPSHOT_SIZE] {
@@ -430,11 +499,14 @@ impl Scheduler {
         buf[pos..pos+8].copy_from_slice(&self.base_ticks.to_le_bytes()); pos += 8;
         buf[pos] = self.cpu_speed; pos += 1;
 
-        // Event timestamps (7 events × 8 bytes each)
+        // Event timestamps (9 events × 8 bytes each)
         for item in &self.items {
             buf[pos..pos+8].copy_from_slice(&item.timestamp.to_le_bytes());
             pos += 8;
         }
+
+        // DMA state
+        buf[pos..pos+8].copy_from_slice(&self.dma_last_mem_timestamp.to_le_bytes());
 
         buf
     }
@@ -456,6 +528,9 @@ impl Scheduler {
             item.timestamp = u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap());
             pos += 8;
         }
+
+        // DMA state
+        self.dma_last_mem_timestamp = u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap());
 
         self.recalc_next_event();
         Ok(())

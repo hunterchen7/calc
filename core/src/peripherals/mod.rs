@@ -16,6 +16,7 @@ pub mod flash;
 pub mod interrupt;
 pub mod keypad;
 pub mod lcd;
+pub mod panel;
 pub mod rtc;
 pub mod sha256;
 pub mod spi;
@@ -52,7 +53,7 @@ const INT_END: u32 = 0x100020;
 const TIMER_BASE: u32 = 0x120000; // 0xF20000
 const TIMER_END: u32 = 0x120040;
 const KEYPAD_BASE: u32 = 0x150000; // 0xF50000
-const KEYPAD_END: u32 = 0x150040;
+const KEYPAD_END: u32 = 0x150048; // Covers up to GPIO status (index 0x11)
 const WATCHDOG_BASE: u32 = 0x160000; // 0xF60000
 const WATCHDOG_END: u32 = 0x160100;
 const RTC_BASE: u32 = 0x180000; // 0xF80000
@@ -253,7 +254,21 @@ impl Peripherals {
             a if a >= INT_BASE && a < INT_END => self.interrupt.write(a - INT_BASE, value),
 
             // Timers (0xF20000 - 0xF2003F)
-            a if a >= TIMER_BASE && a < TIMER_END => self.timers.write(a - TIMER_BASE, value),
+            a if a >= TIMER_BASE && a < TIMER_END => {
+                self.timers.write(a - TIMER_BASE, value);
+                // CEmu: after any timer register write, recalculate interrupt state
+                // for all 3 timers based on (status & mask). This is critical for the
+                // ISR to clear timer interrupts by writing to the status register.
+                let int_state = self.timers.interrupt_state();
+                let timer_sources = [sources::TIMER1, sources::TIMER2, sources::TIMER3];
+                for (i, &src) in timer_sources.iter().enumerate() {
+                    if int_state & (1 << i) != 0 {
+                        self.interrupt.raise(src);
+                    } else {
+                        self.interrupt.clear_raw(src);
+                    }
+                }
+            }
 
             // Keypad Controller (0xF50000 - 0xF5003F)
             a if a >= KEYPAD_BASE && a < KEYPAD_END => {
@@ -305,34 +320,45 @@ impl Peripherals {
     }
 
     /// Tick all peripherals
+    /// delay_remaining: CPU cycles remaining until the TimerDelay event fires (0 if not active)
     /// Returns true if any interrupt is pending
-    pub fn tick(&mut self, cycles: u32) -> bool {
+    pub fn tick(&mut self, cycles: u32, delay_remaining: u64) -> bool {
         // Tick timers (pass CPU speed for 32kHz clock source support)
+        // Timer interrupts are deferred through the 2-cycle delay pipeline.
+        // The caller (emu.rs) checks timers.needs_delay_event and schedules
+        // EventId::TimerDelay, which calls process_delay() to apply status
+        // and raise interrupts.
         let cpu_speed = self.control.cpu_speed();
-        let timer_fired = self.timers.tick(cycles, cpu_speed);
-        if timer_fired & 0x01 != 0 {
-            self.interrupt.raise(sources::TIMER1);
-        }
-        if timer_fired & 0x02 != 0 {
-            self.interrupt.raise(sources::TIMER2);
-        }
-        if timer_fired & 0x04 != 0 {
-            self.interrupt.raise(sources::TIMER3);
+        self.timers.tick(cycles, cpu_speed, delay_remaining);
+
+        // Sync timer interrupt state after tick — ensures stale raw bits are cleared
+        // when timers no longer have active status. Without this, timer raw bits
+        // accumulate from scheduler events but are only cleared when the ISR writes
+        // to the timer registers. If the interrupt wasn't enabled, the ISR never ran,
+        // and raw stays permanently set.
+        let int_state = self.timers.interrupt_state();
+        let timer_sources = [sources::TIMER1, sources::TIMER2, sources::TIMER3];
+        for (i, &src) in timer_sources.iter().enumerate() {
+            if int_state & (1 << i) != 0 {
+                self.interrupt.raise(src);
+            } else {
+                self.interrupt.clear_raw(src);
+            }
         }
 
-        // Tick LCD
-        if self.lcd.tick(cycles) {
-            self.interrupt.raise(sources::LCD);
-        }
+        // LCD interrupts are now driven by scheduler events (EventId::Lcd / EventId::LcdDma)
+        // in emu.rs, matching CEmu's lcd_event()/lcd_dma() architecture.
+        // Check LCD scheduling flags set by control register writes.
+        // (The actual scheduling is done by emu.rs which checks these flags.)
 
-        // Tick keypad scan timing and raise interrupt if scan/status indicates it
-        if self.keypad.tick(cycles, &self.key_state) {
+        // Tick keypad scan timing and update interrupt state
+        // CEmu calls intrpt_set(INT_KEYPAD, status & enable) which sets OR clears raw
+        let keypad_scan_irq = self.keypad.tick(cycles, &self.key_state);
+        let keypad_any_irq = self.keypad.check_interrupt(&self.key_state);
+        if keypad_scan_irq || keypad_any_irq {
             self.interrupt.raise(sources::KEYPAD);
-        }
-
-        // Check keypad using internal key_state (any-key interrupt in continuous mode)
-        if self.keypad.check_interrupt(&self.key_state) {
-            self.interrupt.raise(sources::KEYPAD);
+        } else {
+            self.interrupt.clear_raw(sources::KEYPAD);
         }
 
         // Tick OS Timer (32KHz crystal-based timer)
@@ -393,9 +419,6 @@ impl Peripherals {
 
             // Toggle state AFTER setting interrupt
             self.os_timer_state = !self.os_timer_state;
-
-            // Only process one state change per tick() call
-            break;
         }
     }
 
@@ -469,8 +492,8 @@ impl Peripherals {
         buf[pos..pos+4].copy_from_slice(&self.lcd.upbase().to_le_bytes()); pos += 4;
         buf[pos..pos+4].copy_from_slice(&self.lcd.int_mask().to_le_bytes()); pos += 4;
         buf[pos..pos+4].copy_from_slice(&self.lcd.int_status().to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.lcd.frame_cycles().to_le_bytes()); pos += 4;
-        pos += 4; // Padding
+        buf[pos] = self.lcd.compare_state(); pos += 1;
+        pos += 7; // Padding to 24 bytes
 
         // OS Timer state (16 bytes)
         buf[pos] = if self.os_timer_state { 1 } else { 0 }; pos += 1;
@@ -552,8 +575,8 @@ impl Peripherals {
         self.lcd.set_upbase(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
         self.lcd.set_int_mask(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
         self.lcd.set_int_status(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.lcd.set_frame_cycles(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        pos += 4;
+        self.lcd.set_compare_state(buf[pos]); pos += 1;
+        pos += 7;
 
         // OS Timer state
         self.os_timer_state = buf[pos] != 0; pos += 1;
@@ -760,29 +783,30 @@ mod tests {
         // Enable timer 1 interrupt in interrupt controller
         p.write_test(INT_BASE + 0x04, sources::TIMER1 as u8);
 
-        // Tick should overflow timer and raise interrupt
-        let pending = p.tick(2);
-        assert!(pending);
+        // Tick should overflow timer — but interrupt is deferred through delay pipeline
+        p.tick(2, 0);
+        assert!(p.timers.needs_delay_event);
+
+        // Simulate the delay pipeline processing (normally done by emu.rs TimerDelay event)
+        process_timer_delays(&mut p);
+
         assert!(p.irq_pending());
     }
 
     #[test]
-    fn test_tick_lcd_interrupt() {
+    fn test_lcd_enable_sets_scheduling_flag() {
         let mut p = Peripherals::new();
 
-        // Enable LCD with VBLANK interrupt via write API
-        // Control is at offset 0x18, IMSC is at offset 0x1C
+        // LCD interrupts are now event-driven (not tick-based).
+        // Verify that enabling LCD sets the needs_lcd_event flag.
+        assert!(!p.lcd.needs_lcd_event);
         p.write_test(LCD_BASE + 0x18, 0x01); // ENABLE (control bit 0)
-        p.write_test(LCD_BASE + 0x1C, 0x08); // Enable vert comp interrupt (bit 3, bit 0 reserved)
+        assert!(p.lcd.needs_lcd_event);
 
-        // Enable LCD interrupt in interrupt controller (bit 11 - in byte 1)
-        p.write_test(INT_BASE + 0x04, 0x00); // Low byte
-        p.write_test(INT_BASE + 0x05, (sources::LCD >> 8) as u8); // High byte (bit 11)
-
-        // Tick for a full frame (800_000 cycles at 48MHz/60Hz)
-        let pending = p.tick(800_000);
-        assert!(pending);
-        assert!(p.irq_pending());
+        // Verify that disabling LCD sets the needs_lcd_clear flag
+        p.lcd.needs_lcd_event = false;
+        p.write_test(LCD_BASE + 0x18, 0x00); // Disable
+        assert!(p.lcd.needs_lcd_clear);
     }
 
     #[test]
@@ -800,8 +824,32 @@ mod tests {
         p.set_key(0, 0, true);
 
         // Tick should detect key and raise interrupt
-        let pending = p.tick(1);
+        let pending = p.tick(1, 0);
         assert!(pending);
+    }
+
+    /// Helper to process all pending delay tiers and raise timer interrupts
+    fn process_timer_delays(p: &mut Peripherals) {
+        loop {
+            if !p.timers.needs_delay_schedule() {
+                break;
+            }
+            let (_status, intrpt, has_more) = p.timers.process_delay();
+            for i in 0..3 {
+                if intrpt & (1 << i) != 0 {
+                    let source = match i {
+                        0 => sources::TIMER1,
+                        1 => sources::TIMER2,
+                        2 => sources::TIMER3,
+                        _ => unreachable!(),
+                    };
+                    p.interrupt.raise(source);
+                }
+            }
+            if !has_more {
+                break;
+            }
+        }
     }
 
     #[test]
@@ -843,15 +891,17 @@ mod tests {
         let enabled = sources::TIMER1 | sources::TIMER2 | sources::TIMER3;
         p.write_test(INT_BASE + 0x04, enabled as u8);
 
-        // Tick 2 cycles - should overflow timer 0
-        let pending = p.tick(2);
-        assert!(pending);
+        // Tick 2 cycles - should overflow timer 0 (deferred through delay pipeline)
+        p.tick(2, 0);
+        process_timer_delays(&mut p);
 
         // Tick 1 more - should overflow timer 1
-        p.tick(1);
+        p.tick(1, 0);
+        process_timer_delays(&mut p);
 
         // Tick 1 more - should overflow timer 2
-        p.tick(1);
+        p.tick(1, 0);
+        process_timer_delays(&mut p);
 
         // All 3 timers should have raised interrupts
         assert_ne!(p.interrupt.read(0x00) & sources::TIMER1 as u8, 0);
@@ -875,12 +925,15 @@ mod tests {
         // But don't enable the interrupt in the interrupt controller
         // (enabled = 0 by default)
 
-        // Tick should overflow timer but not report pending
-        let pending = p.tick(2);
-        assert!(!pending);
+        // Tick should overflow timer — deferred through delay pipeline
+        p.tick(2, 0);
+        // Process delay to apply status bits (interrupt controller still won't fire because not enabled)
+        process_timer_delays(&mut p);
+
+        // Timer status is latched but interrupt controller shouldn't report pending
         assert!(!p.irq_pending());
 
-        // Status should still be latched
+        // Status should still be latched in interrupt controller raw register
         assert_ne!(p.interrupt.read(0x00), 0);
     }
 

@@ -32,7 +32,7 @@
 
 ---
 
-## Phase 3: Peripheral Register Layout Rewrites — [partial]
+## Phase 3: Peripheral Register Layout Rewrites — [x]
 **Effort: XL | Risk: Med**
 
 ### 3A: Timer Rewrite (`peripherals/timer.rs`, `peripherals/mod.rs`) — [x]
@@ -41,12 +41,12 @@
 - [x] Timer 0/1/2 at offsets 0x00/0x10/0x20 (counter/reset/match0/match1)
 - [x] Ref: `cemu-ref/core/timers.h:17-28`
 
-### 3B: Keypad Register Packing (`peripherals/keypad.rs`) — [ ]
-- [ ] 32-bit control at 0x00: bits [1:0]=mode, [15:2]=rowWait, [31:16]=scanWait
-- [ ] Remove ROW_WAIT (0x30), SCAN_WAIT (0x34)
-- [ ] 16 data registers (not 8), GPIO enable at 0x40
-- [ ] Fix reset mask 0xFFFF, enable mask `& 0x07`, scan clock 6MHz
-- [ ] Ref: `cemu-ref/core/keypad.c`, `keypad.h:20-46`
+### 3B: Keypad Register Packing (`peripherals/keypad.rs`) — [x]
+- [x] 32-bit control at 0x00: bits [1:0]=mode, [15:2]=rowWait, [31:16]=scanWait
+- [x] Remove ROW_WAIT (0x30), SCAN_WAIT (0x34)
+- [x] 16 data registers (not 8), GPIO enable at 0x40
+- [x] Fix reset mask 0xFFFF, enable mask `& 0x07`, scan clock 6MHz
+- [x] Ref: `cemu-ref/core/keypad.c`, `keypad.h:20-46`
 
 ### 3C: Watchdog Offset Fix (`peripherals/watchdog.rs`) — [x]
 - [x] Counter→0x00, Load→0x04, Restart(0xB9)→0x08, Control→0x0C, Status clear→0x10, Revision→0x1C (0x00010602)
@@ -54,11 +54,11 @@
 - [x] Remove lock register (0xC0)
 - [x] Ref: `cemu-ref/core/misc.c:128-148`
 
-**Verify**: Boot passes (132.79M cycles, PC=085B80). 246/431 tests pass (178 pre-existing failures). 3B deferred.
+**Verify**: Boot passes (156.10M cycles, PC=085B80). 272/457 tests pass (178 pre-existing failures).
 
 ---
 
-## Phase 4: Scheduler & Timing — [partial]
+## Phase 4: Scheduler & Timing — [x]
 **Effort: L | Risk: Med**
 
 - [x] **4A** SCHED_SECOND overflow prevention (`scheduler.rs`) — subtract base_clock_rate from all timestamps every second
@@ -66,9 +66,9 @@
 - [x] **4C** Panel clock rate (`scheduler.rs:~50`) — 60 Hz → 10,000,000 Hz
 - [x] **4D** OS Timer interrupt phase (`peripherals/mod.rs`) — set interrupt to OLD state before toggle; add clear_raw on false
 - [x] **4E** Timer 32kHz clock source (`peripherals/timer.rs`) — control bit selects CLOCK_32K vs CLOCK_CPU
-- [ ] **4F** Timer 2-cycle interrupt delay — SCHED_TIMER_DELAY pipeline (deferred: requires full scheduler integration)
+- [x] **4F** Timer 2-cycle interrupt delay — SCHED_TIMER_DELAY pipeline, delay_status/delay_intrpt packing, process_delay()
 
-**Verify**: Boot passes (108.78M cycles, PC=085B80). 246/431 tests pass (178 pre-existing failures). 4F deferred.
+**Verify**: Boot passes (156.10M cycles, PC=085B80). 272/457 tests pass (178 pre-existing failures).
 
 ---
 
@@ -86,28 +86,28 @@
 
 ---
 
-## Phase 6: LCD & SPI Enhancements — [partial]
+## Phase 6: LCD & SPI Enhancements — [x]
 **Effort: L | Risk: Low**
 
 - [x] **6A** Fix ICR register (`peripherals/lcd.rs`) — offset 0x28 = interrupt clear (not PALBASE), IMSC/RIS as u8, MIS at 0x24, UPCURR/LPCURR, peripheral ID at 0xFE0
 - [x] **6B** Add palette storage — 256 entries at 0x200-0x3FF (512 bytes), UPBASE/LPBASE 8-byte alignment
-- [ ] **6C** Basic LCD DMA engine — deferred (tightly coupled with scheduler, not needed for boot)
-- [ ] **6D** SPI panel stub — deferred (ST7789V is 1375 lines in CEmu, complex)
+- [x] **6C** Basic LCD DMA engine — 5-state event machine (FRONT_PORCH→SYNC→LNBU→BACK_PORCH→ACTIVE_VIDEO), DMA prefill + active phases, UPCURR advancement, CLOCK_24M events + CLOCK_48M DMA, timing parameter extraction, enable/disable scheduling flags
+- [x] **6D** SPI panel stub — minimal ST7789V stub absorbing 9-bit SPI frames, command/data parsing, register storage (MADCTL, COLMOD, CASET, RASET), TX data FIFO in SPI controller, panel wired into transfer completion
 
-**Verify**: Boot passes (108.78M cycles, PC=085B80). 266/444 tests pass (178 pre-existing failures). 6C/6D deferred.
+**Verify**: Boot passes (156.10M cycles, PC=085B80). 277/455 tests pass (178 pre-existing failures).
 
 ---
 
-## Phase 7: CPU Advanced & Bus Protection — [partial]
+## Phase 7: CPU Advanced & Bus Protection — [x]
 **Effort: XL | Risk: High**
 
 - [x] **7A** Separate SPS/SPL (`cpu/mod.rs`, `cpu/helpers.rs`) — replace single `sp` with `sps`+`spl`, `sp()`/`set_sp()` select by L mode
-- [ ] **7B** Mixed-mode CALL/RET/RST — deferred (push MADL|ADL flag byte for cross-mode transitions, depends on 7A)
+- [x] **7B** Mixed-mode CALL/RET/RST — push/pop MADL|ADL flag byte, push_byte_mode/pop_byte_mode helpers, suffix flag propagation
 - [x] **7C** Memory protection (`bus.rs`, `peripherals/control.rs`) — stack limit NMI, protected range check, flash privilege check, ports 0x3D/0x3E
-- [ ] **7D** DMA scheduling — deferred (DMA events steal CPU cycles)
+- [x] **7D** DMA scheduling — LCD DMA steals CPU cycles via `dma_last_mem_timestamp` tracking, `process_dma_stealing()` at instruction boundaries, ~7.7% cycle overhead from bus contention
 - [x] **7E** CPU cycle parity — HALT fast-forwards to next event, interrupt prefetch_discard + L/IL setup, R register rotation, LD A,I PV=IFF1
 
-**Verify**: Boot passes (108.78M cycles, PC=085B80). 266/444 tests pass (178 pre-existing failures). 7B/7D deferred.
+**Verify**: Boot passes (168.14M cycles, PC=085B80). 277/455 tests pass (178 pre-existing failures).
 
 ---
 
@@ -117,10 +117,10 @@
 |-------|-------|:------:|----------|
 | 1 | CPU Instructions | **Done** | — |
 | 2 | Bus/Address Decoding | **Done** | — |
-| 3 | Peripheral Registers | Partial | 3B (Keypad packing) |
-| 4 | Scheduler & Timing | Partial | 4F (Timer delay pipeline) |
+| 3 | Peripheral Registers | **Done** | — |
+| 4 | Scheduler & Timing | **Done** | — |
 | 5 | RTC/SHA256/Control | **Done** | — |
-| 6 | LCD & SPI | Partial | 6C (LCD DMA), 6D (SPI panel) |
-| 7 | CPU Advanced & Bus | Partial | 7B (Mixed-mode CALL/RET), 7D (DMA scheduling) |
+| 6 | LCD & SPI | **Done** | — |
+| 7 | CPU Advanced & Bus | **Done** | — |
 
-All phases implemented and committed on branch `cemu-parity-contd`. Boot passes at PC=085B80 with 108.78M cycles. 266/444 tests pass (178 pre-existing failures).
+All 7 phases complete. Boot passes at PC=085B80 with 168.14M cycles. 277/455 tests pass (178 pre-existing failures). No remaining deferred items.
