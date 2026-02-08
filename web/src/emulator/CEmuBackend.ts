@@ -163,6 +163,11 @@ export class CEmuBackend implements EmulatorBackend {
     this.module._emu_keypad_event(row, col, down);
   }
 
+  isDeviceOff(): boolean {
+    // CEmu backend doesn't expose power state yet
+    return false;
+  }
+
   saveState(): Uint8Array | null {
     if (!this.module || !this._isRomLoaded) return null;
 

@@ -1275,6 +1275,13 @@ impl Emu {
         self.bus.ports.control.lcd_flag_enabled() && self.bus.ports.lcd.is_powered()
     }
 
+    /// Check if the device is in the "off" (sleep) state.
+    /// The OS writes bit 6 of the POWER register to enter sleep mode.
+    /// The device stays off until an ON key press triggers a WAKE interrupt.
+    pub fn is_off(&self) -> bool {
+        self.bus.ports.control.is_off()
+    }
+
     /// Press the ON key - wakes CPU from HALT even with interrupts disabled
     /// Also raises the ON_KEY and WAKE interrupts for normal interrupt handling
     ///

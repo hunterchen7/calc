@@ -110,6 +110,11 @@ export class RustBackend implements EmulatorBackend {
     this.emu.set_key(row, col, down);
   }
 
+  isDeviceOff(): boolean {
+    if (!this.emu) return false;
+    return this.emu.is_device_off();
+  }
+
   saveState(): Uint8Array | null {
     if (!this.emu || !this._isRomLoaded) return null;
     const data = this.emu.save_state();

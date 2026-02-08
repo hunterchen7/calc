@@ -380,6 +380,13 @@ export function Calculator({
       const width = backend.getFramebufferWidth();
       const height = backend.getFramebufferHeight();
 
+      // Show black screen when device is off (sleeping)
+      if (backend.isDeviceOff()) {
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, width, height);
+        return;
+      }
+
       // Get framebuffer as RGBA
       const rgba = backend.getFramebufferRGBA();
 

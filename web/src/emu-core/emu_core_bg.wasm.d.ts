@@ -25,6 +25,7 @@ export const wasmemu_framebuffer_height: (a: number) => number;
 export const wasmemu_framebuffer_width: (a: number) => number;
 export const wasmemu_get_backlight: (a: number) => number;
 export const wasmemu_get_framebuffer_rgba: (a: number) => [number, number];
+export const wasmemu_is_device_off: (a: number) => number;
 export const wasmemu_is_lcd_on: (a: number) => number;
 export const wasmemu_load_rom: (a: number, b: number, c: number) => number;
 export const wasmemu_load_state: (a: number, b: number, c: number) => number;
