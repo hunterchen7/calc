@@ -19,61 +19,42 @@ struct EmulatorView: View {
     private let sidebarWidth: CGFloat = 280
     private let edgeSwipeWidth: CGFloat = 30
 
+    /// Combined calculator body aspect ratio (bezel + keypad as one image)
+    private let bodyAspectRatio: CGFloat = 963.0 / 2239.0
+
+    /// LCD position as percentages of the combined body image
+    private let lcdLeft: CGFloat = 11.53
+    private let lcdTop: CGFloat = 6.92
+    private let lcdWidth: CGFloat = 76.74
+    private let lcdHeight: CGFloat = 24.92
+
+    /// Keypad area within the combined body image (percentages)
+    private let keypadTop: CGFloat = 34.57
+    private let keypadHeight: CGFloat = 65.43
+
     var body: some View {
-        GeometryReader { _ in
-            ZStack(alignment: .topLeading) {
-                // Main content
-                VStack(spacing: 8) {
-                    // Screen display
-                    screenDisplay
-                        .aspectRatio(320.0 / 240.0, contentMode: .fit)
-                        .background(Color.black)
-                        .cornerRadius(4)
-                        .padding(.horizontal, 8)
-                        .padding(.top, 8)
+        ZStack {
+            Color.black
 
-                    // Keypad
-                    KeypadView(
-                        onKeyDown: { row, col in state.keyDown(row: row, col: col) },
-                        onKeyUp: { row, col in state.keyUp(row: row, col: col) }
-                    )
-                }
+            calculatorBody
 
-                // Invisible edge swipe area for opening sidebar
-                if !showingSidebar {
-                    Color.clear
-                        .frame(width: edgeSwipeWidth)
-                        .contentShape(Rectangle())
-                        .gesture(
-                            DragGesture(minimumDistance: 10)
-                                .onChanged { value in
-                                    if value.translation.width > 0 {
-                                        sidebarDragOffset = min(value.translation.width, sidebarWidth)
-                                    }
-                                }
-                                .onEnded { value in
-                                    withAnimation(.easeOut(duration: 0.25)) {
-                                        if value.translation.width > sidebarWidth * 0.3 {
-                                            showingSidebar = true
-                                        }
-                                        sidebarDragOffset = 0
-                                    }
-                                }
-                        )
-                }
+            // Invisible edge swipe area for opening sidebar
+            if !showingSidebar {
+                edgeSwipeArea
+            }
 
-                // Sidebar overlay with swipe-to-close
-                if showingSidebar || sidebarDragOffset > 0 {
-                    sidebarOverlay
-                }
+            // Sidebar overlay with swipe-to-close
+            if showingSidebar || sidebarDragOffset > 0 {
+                sidebarOverlay
+            }
 
-                // Debug overlay
-                if state.showDebug {
-                    DebugOverlayView(state: state)
-                        .padding(.top, 50)
-                }
+            // Debug overlay
+            if state.showDebug {
+                DebugOverlayView(state: state)
+                    .padding(.top, 50)
             }
         }
+        .ignoresSafeArea()
         .sheet(isPresented: $showingRomPicker) {
             DocumentPicker { url in
                 loadRom(from: url)
@@ -82,6 +63,69 @@ struct EmulatorView: View {
         .sheet(isPresented: $showingBackendPicker) {
             BackendPickerView(state: state)
         }
+    }
+
+    /// Combined calculator body image with LCD and keypad overlay
+    private var calculatorBody: some View {
+        Image("calculator_body")
+            .resizable()
+            .aspectRatio(bodyAspectRatio, contentMode: .fit)
+            .overlay {
+                GeometryReader { geo in
+                    let w = geo.size.width
+                    let h = geo.size.height
+
+                    // LCD positioned within combined body
+                    screenDisplay
+                        .frame(
+                            width: w * lcdWidth / 100,
+                            height: h * lcdHeight / 100
+                        )
+                        .clipped()
+                        .position(
+                            x: w * (lcdLeft + lcdWidth / 2) / 100,
+                            y: h * (lcdTop + lcdHeight / 2) / 100
+                        )
+
+                    // Keypad buttons overlay (positioned over keypad portion)
+                    ImageKeypadView(
+                        onKeyDown: { row, col in state.keyDown(row: row, col: col) },
+                        onKeyUp: { row, col in state.keyUp(row: row, col: col) }
+                    )
+                    .frame(
+                        width: w,
+                        height: h * keypadHeight / 100
+                    )
+                    .position(
+                        x: w / 2,
+                        y: h * (keypadTop + keypadHeight / 2) / 100
+                    )
+                }
+            }
+    }
+
+    /// Edge swipe gesture area for opening the sidebar
+    private var edgeSwipeArea: some View {
+        Color.clear
+            .frame(width: edgeSwipeWidth)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 10)
+                    .onChanged { value in
+                        if value.translation.width > 0 {
+                            sidebarDragOffset = min(value.translation.width, sidebarWidth)
+                        }
+                    }
+                    .onEnded { value in
+                        withAnimation(.easeOut(duration: 0.25)) {
+                            if value.translation.width > sidebarWidth * 0.3 {
+                                showingSidebar = true
+                            }
+                            sidebarDragOffset = 0
+                        }
+                    }
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
 
     /// LCD screen display
