@@ -385,6 +385,135 @@ impl Emu {
         Ok(())
     }
 
+    /// Send a .8xp/.8xv file to the emulator by injecting into flash archive.
+    ///
+    /// Must be called after `load_rom()` and before `power_on()`. The variable
+    /// entries are written to the flash archive region (0x0C0000+) in the format
+    /// the TI-OS expects. When the OS boots, it scans flash and discovers them.
+    ///
+    /// Returns Ok(count) with the number of entries injected, or an error code.
+    pub fn send_file(&mut self, file_data: &[u8]) -> Result<usize, i32> {
+        use crate::ti_file::TiFile;
+
+        if !self.rom_loaded {
+            return Err(-10); // ROM not loaded
+        }
+        if self.powered_on {
+            return Err(-13); // Must inject before boot
+        }
+
+        let ti_file = TiFile::parse(file_data).map_err(|e| {
+            log_evt!("SEND_FILE_PARSE_ERROR: {}", e);
+            -11 // Parse error
+        })?;
+
+        let count = ti_file.entries.len();
+        for entry in &ti_file.entries {
+            self.inject_archive_entry(entry)?;
+        }
+
+        Ok(count)
+    }
+
+    /// Find the first free address in the flash archive region.
+    /// Free space is indicated by 0xFF bytes.
+    fn find_archive_free_addr(&self) -> Option<u32> {
+        // Archive region: 0x0C0000 to 0x3AFFFF
+        const ARCHIVE_START: u32 = 0x0C0000;
+        const ARCHIVE_END: u32 = 0x3B0000;
+
+        let mut addr = ARCHIVE_START;
+        while addr < ARCHIVE_END {
+            let byte = self.bus.flash.peek(addr);
+            if byte == 0xFF {
+                // Found free space — verify a reasonable stretch is free
+                return Some(addr);
+            }
+            // Skip over entries. The format has a 2-byte size after the
+            // type/type2/version/addr header. We use a simpler scan:
+            // just advance byte-by-byte looking for 0xFF region.
+            addr += 1;
+        }
+        None
+    }
+
+    /// Inject a single variable entry into the flash archive.
+    ///
+    /// Archive entry format (in flash):
+    ///   [type1] [type2=0] [version] [addr_lo] [addr_mid] [addr_hi]
+    ///   [namelen] [name bytes...] [data...]
+    ///
+    /// The 3-byte address field is self-referential: it points to byte 0
+    /// of this entry (the type1 byte) in flash.
+    fn inject_archive_entry(&mut self, entry: &crate::ti_file::TiVarEntry) -> Result<(), i32> {
+        const ARCHIVE_END: u32 = 0x3B0000;
+        const SECTOR_SIZE: u32 = 0x10000; // 64KB
+
+        let free_addr = self.find_archive_free_addr().ok_or(-12)?; // -12 = no space
+
+        let name_len = entry.name_len();
+        // Entry layout: type1(1) + type2(1) + version(1) + addr(3) + namelen(1) + name(N) + data
+        let header_len = 6 + 1 + name_len; // 6 for type1/type2/version/addr, 1 for namelen, N for name
+        let total_len = header_len + entry.data.len();
+
+        // Check sector boundary: entry must not cross a 64KB boundary
+        let sector_start = free_addr & !(SECTOR_SIZE - 1);
+        let sector_end = sector_start + SECTOR_SIZE;
+        let mut write_addr = free_addr;
+        if write_addr + total_len as u32 > sector_end {
+            // Skip to next sector
+            write_addr = sector_end;
+            if write_addr + total_len as u32 > ARCHIVE_END {
+                return Err(-12); // No space
+            }
+        }
+
+        // The self-referential address points to the start of this entry
+        let self_addr = write_addr;
+
+        // Write the entry
+        let mut offset = write_addr;
+        // type1
+        self.bus.flash.write_direct(offset, entry.var_type.as_u8());
+        offset += 1;
+        // type2
+        self.bus.flash.write_direct(offset, 0x00);
+        offset += 1;
+        // version
+        self.bus.flash.write_direct(offset, entry.version);
+        offset += 1;
+        // 3-byte self-referential address (little-endian)
+        self.bus.flash.write_direct(offset, self_addr as u8);
+        offset += 1;
+        self.bus.flash.write_direct(offset, (self_addr >> 8) as u8);
+        offset += 1;
+        self.bus.flash.write_direct(offset, (self_addr >> 16) as u8);
+        offset += 1;
+        // namelen
+        self.bus.flash.write_direct(offset, name_len as u8);
+        offset += 1;
+        // name bytes
+        for i in 0..name_len {
+            self.bus.flash.write_direct(offset, entry.name[i]);
+            offset += 1;
+        }
+        // data (includes the 2-byte size prefix for programs/appvars)
+        for &byte in &entry.data {
+            self.bus.flash.write_direct(offset, byte);
+            offset += 1;
+        }
+
+        log_evt!(
+            "ARCHIVE_INJECT name={} type=0x{:02X} addr=0x{:06X} size={}",
+            entry.name_str(),
+            entry.var_type.as_u8(),
+            self_addr,
+            total_len,
+        );
+
+        Ok(())
+    }
+
     /// Set serial flash mode
     /// - true: Serial flash (newer TI-84 CE models) - uses cache timing
     /// - false: Parallel flash (older models) - uses constant 10 cycle timing
@@ -2463,5 +2592,127 @@ mod tests {
 
         // CPU should still be halted (regular IRQ can't wake with DI)
         assert!(emu.cpu.halted);
+    }
+
+    /// Helper: create a minimal .8xp from components
+    fn make_test_8xp(var_type: u8, name: &[u8; 8], version: u8, flag: u8, var_data: &[u8]) -> Vec<u8> {
+        let mut file = Vec::new();
+        file.extend_from_slice(b"**TI83F*");
+        file.extend_from_slice(&[0x1A, 0x0A, 0x00]);
+        file.extend_from_slice(&[0u8; 42]);
+        let entry_len = 17 + var_data.len();
+        file.extend_from_slice(&(entry_len as u16).to_le_bytes());
+        file.extend_from_slice(&13u16.to_le_bytes());
+        file.extend_from_slice(&(var_data.len() as u16).to_le_bytes());
+        file.push(var_type);
+        file.extend_from_slice(name);
+        file.push(version);
+        file.push(flag);
+        file.extend_from_slice(&(var_data.len() as u16).to_le_bytes());
+        file.extend_from_slice(var_data);
+        let checksum: u16 = file[55..].iter().fold(0u16, |acc, &b| acc.wrapping_add(b as u16));
+        file.extend_from_slice(&checksum.to_le_bytes());
+        file
+    }
+
+    #[test]
+    fn test_send_file_requires_rom() {
+        let mut emu = Emu::new();
+        let file = make_test_8xp(0x05, b"TEST\0\0\0\0", 0, 0, &[0, 0, 0xEF, 0x7B]);
+        assert_eq!(emu.send_file(&file), Err(-10));
+    }
+
+    #[test]
+    fn test_send_file_basic() {
+        let mut emu = Emu::new();
+        // Load a minimal ROM (all 0xFF flash)
+        let rom = vec![0xFF; 1024];
+        emu.load_rom(&rom).unwrap();
+
+        let var_data = vec![0x02, 0x00, 0xEF, 0x7B]; // size=2, ASM marker
+        let file = make_test_8xp(0x05, b"TEST\0\0\0\0", 0, 0, &var_data);
+
+        let result = emu.send_file(&file);
+        assert_eq!(result, Ok(1));
+
+        // Verify the entry was written to the archive region (0x0C0000)
+        // First byte should be the type (0x05 = Program)
+        assert_eq!(emu.bus.flash.peek(0x0C0000), 0x05);
+        // type2 = 0
+        assert_eq!(emu.bus.flash.peek(0x0C0001), 0x00);
+        // version = 0
+        assert_eq!(emu.bus.flash.peek(0x0C0002), 0x00);
+        // Self-referential address = 0x0C0000 (LE)
+        assert_eq!(emu.bus.flash.peek(0x0C0003), 0x00);
+        assert_eq!(emu.bus.flash.peek(0x0C0004), 0x00);
+        assert_eq!(emu.bus.flash.peek(0x0C0005), 0x0C);
+        // namelen = 4 ("TEST")
+        assert_eq!(emu.bus.flash.peek(0x0C0006), 0x04);
+        // name = "TEST"
+        assert_eq!(emu.bus.flash.peek(0x0C0007), b'T');
+        assert_eq!(emu.bus.flash.peek(0x0C0008), b'E');
+        assert_eq!(emu.bus.flash.peek(0x0C0009), b'S');
+        assert_eq!(emu.bus.flash.peek(0x0C000A), b'T');
+        // Data starts at 0x0C000B: [0x02, 0x00, 0xEF, 0x7B]
+        assert_eq!(emu.bus.flash.peek(0x0C000B), 0x02);
+        assert_eq!(emu.bus.flash.peek(0x0C000C), 0x00);
+        assert_eq!(emu.bus.flash.peek(0x0C000D), 0xEF);
+        assert_eq!(emu.bus.flash.peek(0x0C000E), 0x7B);
+        // Next byte should still be 0xFF (free)
+        assert_eq!(emu.bus.flash.peek(0x0C000F), 0xFF);
+    }
+
+    #[test]
+    fn test_send_file_multiple() {
+        let mut emu = Emu::new();
+        let rom = vec![0xFF; 1024];
+        emu.load_rom(&rom).unwrap();
+
+        let file1 = make_test_8xp(0x05, b"PROG1\0\0\0", 0, 0, &[0x01, 0x00, 0xAA]);
+        let file2 = make_test_8xp(0x15, b"APPVAR\0\0", 0, 0x80, &[0x02, 0x00, 0xBB, 0xCC]);
+
+        assert_eq!(emu.send_file(&file1), Ok(1));
+        assert_eq!(emu.send_file(&file2), Ok(1));
+
+        // First entry at 0x0C0000
+        assert_eq!(emu.bus.flash.peek(0x0C0000), 0x05); // Program type
+        // Second entry should follow the first
+        // First entry size: 6 + 1 + 5 + 3 = 15 bytes, so next at 0x0C000F
+        let second_start = 0x0C0000u32 + 6 + 1 + 5 + 3;
+        assert_eq!(emu.bus.flash.peek(second_start), 0x15); // AppVar type
+    }
+
+    #[test]
+    fn test_send_file_rejects_after_poweron() {
+        let mut emu = Emu::new();
+        let rom = vec![0xFF; 1024];
+        emu.load_rom(&rom).unwrap();
+        emu.power_on();
+
+        let file = make_test_8xp(0x05, b"TEST\0\0\0\0", 0, 0, &[0, 0]);
+        assert_eq!(emu.send_file(&file), Err(-13));
+    }
+
+    #[test]
+    fn test_send_real_doom_8xp() {
+        let path = "/tmp/DOOM.8xp";
+        if let Ok(data) = std::fs::read(path) {
+            let mut emu = Emu::new();
+            let rom = vec![0xFF; 1024];
+            emu.load_rom(&rom).unwrap();
+
+            let result = emu.send_file(&data);
+            assert_eq!(result, Ok(1));
+
+            // Verify the DOOM entry was written at 0x0C0000
+            assert_eq!(emu.bus.flash.peek(0x0C0000), 0x06); // Protected program
+            // namelen = 4
+            assert_eq!(emu.bus.flash.peek(0x0C0006), 0x04);
+            // name = "DOOM"
+            assert_eq!(emu.bus.flash.peek(0x0C0007), b'D');
+            assert_eq!(emu.bus.flash.peek(0x0C0008), b'O');
+            assert_eq!(emu.bus.flash.peek(0x0C0009), b'O');
+            assert_eq!(emu.bus.flash.peek(0x0C000A), b'M');
+        }
     }
 }
