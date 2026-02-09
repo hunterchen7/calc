@@ -44,6 +44,10 @@ int backend_load_rom(Emu* emu, const uint8_t* data, size_t len) {
     return emu_load_rom(emu, data, len);
 }
 
+int backend_send_file(Emu* emu, const uint8_t* data, size_t len) {
+    return emu_send_file(emu, data, len);
+}
+
 void backend_reset(Emu* emu) {
     emu_reset(emu);
 }

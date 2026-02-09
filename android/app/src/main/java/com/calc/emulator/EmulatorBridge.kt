@@ -173,6 +173,21 @@ class EmulatorBridge {
     }
 
     /**
+     * Send a .8xp/.8xv file to the emulator.
+     * Injects into flash archive so TI-OS discovers it on boot.
+     * Must be called after loadRom() and before powerOn().
+     * @param fileBytes .8xp or .8xv file contents
+     * @return Number of entries injected (>=0), or negative error code
+     */
+    fun sendFile(fileBytes: ByteArray): Int {
+        if (handle == 0L) {
+            Log.e(TAG, "sendFile: emulator not created")
+            return -1
+        }
+        return nativeSendFile(handle, fileBytes)
+    }
+
+    /**
      * Reset the emulator to initial state.
      */
     fun reset() {
@@ -334,6 +349,7 @@ class EmulatorBridge {
     private external fun nativeCreate(): Long
     private external fun nativeDestroy(handle: Long)
     private external fun nativeLoadRom(handle: Long, romBytes: ByteArray): Int
+    private external fun nativeSendFile(handle: Long, fileBytes: ByteArray): Int
     private external fun nativeReset(handle: Long)
     private external fun nativePowerOn(handle: Long)
     private external fun nativeRunCycles(handle: Long, cycles: Int): Int

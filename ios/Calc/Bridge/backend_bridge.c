@@ -34,6 +34,7 @@ typedef int (*is_lcd_on_fn)(const Emu*);
 typedef size_t (*save_state_size_fn)(const Emu*);
 typedef int (*save_state_fn)(const Emu*, uint8_t*, size_t);
 typedef int (*load_state_fn)(Emu*, const uint8_t*, size_t);
+typedef int (*send_file_fn)(Emu*, const uint8_t*, size_t);
 
 // Backend interface structure
 typedef struct {
@@ -42,6 +43,7 @@ typedef struct {
     destroy_fn destroy;
     set_log_callback_fn set_log_callback;
     load_rom_fn load_rom;
+    send_file_fn send_file;
     reset_fn reset;
     power_on_fn power_on;
     run_cycles_fn run_cycles;
@@ -60,6 +62,7 @@ extern Emu* rust_emu_create(void);
 extern void rust_emu_destroy(Emu*);
 extern void rust_emu_set_log_callback(emu_log_cb_t);
 extern int rust_emu_load_rom(Emu*, const uint8_t*, size_t);
+extern int rust_emu_send_file(Emu*, const uint8_t*, size_t);
 extern void rust_emu_reset(Emu*);
 extern void rust_emu_power_on(Emu*);
 extern int rust_emu_run_cycles(Emu*, int);
@@ -77,6 +80,7 @@ static const BackendInterface rust_backend = {
     .destroy = rust_emu_destroy,
     .set_log_callback = rust_emu_set_log_callback,
     .load_rom = rust_emu_load_rom,
+    .send_file = rust_emu_send_file,
     .reset = rust_emu_reset,
     .power_on = rust_emu_power_on,
     .run_cycles = rust_emu_run_cycles,
@@ -96,6 +100,7 @@ extern Emu* cemu_emu_create(void);
 extern void cemu_emu_destroy(Emu*);
 extern void cemu_emu_set_log_callback(emu_log_cb_t);
 extern int cemu_emu_load_rom(Emu*, const uint8_t*, size_t);
+extern int cemu_emu_send_file(Emu*, const uint8_t*, size_t);
 extern void cemu_emu_reset(Emu*);
 extern void cemu_emu_power_on(Emu*);
 extern int cemu_emu_run_cycles(Emu*, int);
@@ -113,6 +118,7 @@ static const BackendInterface cemu_backend = {
     .destroy = cemu_emu_destroy,
     .set_log_callback = cemu_emu_set_log_callback,
     .load_rom = cemu_emu_load_rom,
+    .send_file = cemu_emu_send_file,
     .reset = cemu_emu_reset,
     .power_on = cemu_emu_power_on,
     .run_cycles = cemu_emu_run_cycles,
@@ -237,6 +243,11 @@ void emu_set_log_callback(emu_log_cb_t cb) {
 int emu_load_rom(Emu* emu, const uint8_t* data, size_t len) {
     if (!current_backend || !emu) return -1;
     return current_backend->load_rom(emu, data, len);
+}
+
+int emu_send_file(Emu* emu, const uint8_t* data, size_t len) {
+    if (!current_backend || !emu) return -1;
+    return current_backend->send_file(emu, data, len);
 }
 
 void emu_reset(Emu* emu) {

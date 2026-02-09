@@ -135,6 +135,38 @@ class EmulatorBridge {
         return result
     }
 
+    /// Send a .8xp/.8xv file to the emulator.
+    /// Injects into flash archive so TI-OS discovers it on boot.
+    /// Must be called after loadRom() and before powerOn().
+    /// - Parameter data: .8xp or .8xv file contents
+    /// - Returns: Number of entries injected (>=0), or negative error code
+    func sendFile(_ data: Data) -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard let h = handle else {
+            Self.logger.error("sendFile: emulator not created")
+            return -1
+        }
+
+        Self.logger.info("Sending file: \(data.count) bytes")
+
+        let result = data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) -> Int32 in
+            guard let ptr = bytes.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                return -2
+            }
+            return emu_send_file(h, ptr, data.count)
+        }
+
+        if result < 0 {
+            Self.logger.error("sendFile: emu_send_file returned \(result)")
+        } else {
+            Self.logger.info("sendFile: injected \(result) entries")
+        }
+
+        return result
+    }
+
     /// Reset the emulator to initial state.
     func reset() {
         lock.lock()

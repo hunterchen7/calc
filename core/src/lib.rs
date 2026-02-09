@@ -116,6 +116,27 @@ pub extern "C" fn emu_load_rom(emu: *mut SyncEmu, data: *const u8, len: usize) -
     }
 }
 
+/// Send a .8xp/.8xv file to the emulator.
+/// Injects the file into the flash archive so TI-OS discovers it on boot.
+/// Must be called after load_rom() and before power_on().
+/// Returns: number of entries injected (>=0), or negative error code.
+/// Error codes: -10 = ROM not loaded, -11 = parse error, -12 = no flash space, -13 = already booted
+#[cfg_attr(not(feature = "ios_prefixed"), no_mangle)]
+#[cfg_attr(feature = "ios_prefixed", export_name = "rust_emu_send_file")]
+pub extern "C" fn emu_send_file(emu: *mut SyncEmu, data: *const u8, len: usize) -> i32 {
+    if emu.is_null() || data.is_null() || len == 0 {
+        return -1;
+    }
+
+    let sync_emu = unsafe { &*emu };
+    let file_data = unsafe { slice::from_raw_parts(data, len) };
+    let mut emu = sync_emu.inner.lock().unwrap();
+    match emu.send_file(file_data) {
+        Ok(count) => count as i32,
+        Err(code) => code,
+    }
+}
+
 /// Reset the emulator to initial state.
 #[cfg_attr(not(feature = "ios_prefixed"), no_mangle)]
 #[cfg_attr(feature = "ios_prefixed", export_name = "rust_emu_reset")]
