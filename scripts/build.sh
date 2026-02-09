@@ -349,13 +349,17 @@ CMAKEOF
     fi
 
     echo ""
-    echo "==> Backend build complete!"
+    echo "==> Backend libraries built!"
     echo "    Output: $DEST_DIR"
     [ "$BUILD_RUST" = true ] && echo "      - libemu_rust.a (Rust backend)"
     [ "$BUILD_CEMU" = true ] && echo "      - libemu_cemu.a (CEmu backend)"
     echo ""
     echo "In Xcode, select the '$XCODE_SCHEME' scheme, then build and run."
-    echo "  (backend_bridge.c is compiled by Xcode with the correct preprocessor flags)"
+
+    if [ "$OPEN_XCODE" = true ]; then
+        echo "==> Opening Xcode..."
+        open "$PROJECT_ROOT/ios/Calc.xcodeproj"
+    fi
 }
 
 # Run the appropriate build
