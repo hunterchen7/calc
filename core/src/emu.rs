@@ -87,6 +87,33 @@ fn check_armed_trace_on_wake(was_halted: bool, is_halted: bool) {
 pub const SCREEN_WIDTH: usize = 320;
 pub const SCREEN_HEIGHT: usize = 240;
 
+/// Convert RGB565 (R=15:11, G=10:5, B=4:0) to ARGB8888.
+/// Matches CEmu's lcd_rgb565out + lcd_argb8888out.
+#[inline]
+fn rgb565_to_argb8888(rgb565: u16) -> u32 {
+    let r = ((rgb565 >> 11) & 0x1F) as u8;
+    let g = ((rgb565 >> 5) & 0x3F) as u8;
+    let b = (rgb565 & 0x1F) as u8;
+    let r8 = (r << 3) | (r >> 2);
+    let g8 = (g << 2) | (g >> 4);
+    let b8 = (b << 3) | (b >> 2);
+    0xFF000000 | ((r8 as u32) << 16) | ((g8 as u32) << 8) | (b8 as u32)
+}
+
+/// Convert BGR565 (B=15:11, G=10:5, R=4:0) to ARGB8888.
+/// The LCD palette stores colors in BGR565 format after 1555→565 conversion.
+/// Matches CEmu's lcd_rgb565out applied to BGR-ordered data.
+#[inline]
+fn bgr565_to_argb8888(bgr565: u16) -> u32 {
+    let b = ((bgr565 >> 11) & 0x1F) as u8;
+    let g = ((bgr565 >> 5) & 0x3F) as u8;
+    let r = (bgr565 & 0x1F) as u8;
+    let r8 = (r << 3) | (r >> 2);
+    let g8 = (g << 2) | (g >> 4);
+    let b8 = (b << 3) | (b >> 2);
+    0xFF000000 | ((r8 as u32) << 16) | ((g8 as u32) << 8) | (b8 as u32)
+}
+
 /// Cycles after which boot is considered complete and TI-OS initialization can happen
 /// Boot completes at ~62M cycles; we wait a bit longer to ensure TI-OS is ready
 const BOOT_COMPLETE_CYCLES: u64 = 65_000_000;
@@ -1382,13 +1409,48 @@ impl Emu {
         self.bus.ports.keypad.mode()
     }
 
-    /// Render the current VRAM contents to the framebuffer
-    /// Converts RGB565 to ARGB8888
+    /// Render the current VRAM contents to the framebuffer.
+    /// Supports both 8bpp indexed color (used by graphx games) and 16bpp RGB565 (used by TI-OS).
     pub fn render_frame(&mut self) {
         let upbase = self.bus.ports.lcd.upbase();
+        let bpp_mode = self.bus.ports.lcd.bpp_mode();
 
-        // VRAM lives in the RAM region — read directly from the backing store
-        // instead of 153,600 peek_byte calls through the bus decode path.
+        match bpp_mode {
+            3 => self.render_frame_8bpp(upbase),
+            _ => self.render_frame_16bpp(upbase),
+        }
+    }
+
+    /// Render 8bpp indexed color mode (BPP=3).
+    /// Each VRAM byte is a palette index. The palette at LCD 0xE30200 maps indices to colors.
+    /// This is what the graphx library and all CE games use.
+    fn render_frame_8bpp(&mut self, upbase: u32) {
+        let ram_offset = upbase.wrapping_sub(crate::memory::addr::RAM_START) as usize;
+        let needed = SCREEN_WIDTH * SCREEN_HEIGHT; // 1 byte per pixel
+        let ram_data = self.bus.ram.data();
+        // Copy palette to avoid borrow conflict in fallback path
+        let palette = *self.bus.ports.lcd.palette_for_mode();
+
+        if ram_offset < ram_data.len() && ram_offset + needed <= ram_data.len() {
+            let vram = &ram_data[ram_offset..ram_offset + needed];
+            for (i, &index) in vram.iter().enumerate() {
+                let bgr565 = palette[index as usize];
+                self.framebuffer[i] = bgr565_to_argb8888(bgr565);
+            }
+        } else {
+            // Fallback for out-of-range UPBASE
+            for i in 0..(SCREEN_WIDTH * SCREEN_HEIGHT) {
+                let vram_addr = upbase + i as u32;
+                let index = self.bus.peek_byte(vram_addr);
+                let bgr565 = palette[index as usize];
+                self.framebuffer[i] = bgr565_to_argb8888(bgr565);
+            }
+        }
+    }
+
+    /// Render 16bpp direct color mode (BPP=4+).
+    /// Each pixel is 2 bytes of RGB565 in VRAM. Used by TI-OS boot screen.
+    fn render_frame_16bpp(&mut self, upbase: u32) {
         let ram_offset = upbase.wrapping_sub(crate::memory::addr::RAM_START) as usize;
         let needed = SCREEN_WIDTH * SCREEN_HEIGHT * 2;
         let ram_data = self.bus.ram.data();
@@ -1397,13 +1459,7 @@ impl Emu {
             let vram = &ram_data[ram_offset..ram_offset + needed];
             for (i, chunk) in vram.chunks_exact(2).enumerate() {
                 let rgb565 = u16::from_le_bytes([chunk[0], chunk[1]]);
-                let r = ((rgb565 >> 11) & 0x1F) as u8;
-                let g = ((rgb565 >> 5) & 0x3F) as u8;
-                let b = (rgb565 & 0x1F) as u8;
-                let r8 = (r << 3) | (r >> 2);
-                let g8 = (g << 2) | (g >> 4);
-                let b8 = (b << 3) | (b >> 2);
-                self.framebuffer[i] = 0xFF000000 | ((r8 as u32) << 16) | ((g8 as u32) << 8) | (b8 as u32);
+                self.framebuffer[i] = rgb565_to_argb8888(rgb565);
             }
         } else {
             // Fallback for out-of-range UPBASE (e.g. before LCD is configured)
@@ -1414,13 +1470,7 @@ impl Emu {
                     let lo = self.bus.peek_byte(vram_addr) as u16;
                     let hi = self.bus.peek_byte(vram_addr + 1) as u16;
                     let rgb565 = lo | (hi << 8);
-                    let r = ((rgb565 >> 11) & 0x1F) as u8;
-                    let g = ((rgb565 >> 5) & 0x3F) as u8;
-                    let b = (rgb565 & 0x1F) as u8;
-                    let r8 = (r << 3) | (r >> 2);
-                    let g8 = (g << 2) | (g >> 4);
-                    let b8 = (b << 3) | (b >> 2);
-                    self.framebuffer[y * SCREEN_WIDTH + x] = 0xFF000000 | ((r8 as u32) << 16) | ((g8 as u32) << 8) | (b8 as u32);
+                    self.framebuffer[y * SCREEN_WIDTH + x] = rgb565_to_argb8888(rgb565);
                 }
             }
         }

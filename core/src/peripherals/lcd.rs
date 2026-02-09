@@ -114,6 +114,12 @@ pub struct LcdController {
     lpcurr: u32,
     /// 256-entry color palette (stored as raw bytes, 2 bytes per entry)
     palette: [u8; 512],
+    /// Pre-converted palette: BGR565 (from 1555 raw palette)
+    /// Updated on every palette write, matching CEmu's lcd.palettes[0]
+    palette_bgr565: [u16; 256],
+    /// Pre-converted palette: RGB565 (R/B swapped from BGR565)
+    /// Updated on every palette write, matching CEmu's lcd.palettes[1]
+    palette_rgb565: [u16; 256],
 
     // === DMA state machine (CEmu parity) ===
 
@@ -180,6 +186,8 @@ impl LcdController {
             upcurr: 0,
             lpcurr: 0,
             palette: [0; 512],
+            palette_bgr565: [0; 256],
+            palette_rgb565: [0; 256],
             compare: LcdCompare::FrontPorch,
             prefill: false,
             pos: 0,
@@ -215,6 +223,8 @@ impl LcdController {
         self.upcurr = 0;
         self.lpcurr = 0;
         self.palette = [0; 512];
+        self.palette_bgr565 = [0; 256];
+        self.palette_rgb565 = [0; 256];
         self.compare = LcdCompare::FrontPorch;
         self.prefill = false;
         self.pos = 0;
@@ -281,6 +291,18 @@ impl LcdController {
     /// Get BPP mode from control register (bits 1-3)
     pub fn bpp_mode(&self) -> u8 {
         ((self.control >> ctrl::BPP_SHIFT) & ctrl::BPP_MASK) as u8
+    }
+
+    /// Get pre-converted palette for current BGR mode.
+    /// Returns BGR565 palette when BGR bit (control bit 8) is clear,
+    /// or RGB565 palette when BGR bit is set.
+    /// Matches CEmu's `lcd.palettes[bgr & 1]` selection.
+    pub fn palette_for_mode(&self) -> &[u16; 256] {
+        if self.control & ctrl::BGR != 0 {
+            &self.palette_rgb565
+        } else {
+            &self.palette_bgr565
+        }
     }
 
     /// Check if LCD interrupt should be active (ris & imsc)
@@ -663,7 +685,21 @@ impl LcdController {
         } else if index < regs::PALETTE_END {
             // Palette write (0x200-0x3FF)
             let palette_idx = (index - regs::PALETTE_START) as usize;
-            self.palette[palette_idx] = value;
+            if self.palette[palette_idx] != value {
+                self.palette[palette_idx] = value;
+                // Pre-convert 1555 → BGR565/RGB565 (matches CEmu lcd_write palette handling)
+                let entry = palette_idx >> 1;
+                let lo = self.palette[entry * 2] as u16;
+                let hi = self.palette[entry * 2 + 1] as u16;
+                let color = lo | (hi << 8);
+                // 1555→BGR565: doubles the green MSB as the new 6th bit
+                let bgr565 = color.wrapping_add(color & 0xFFE0)
+                    .wrapping_add((color >> 10) & 0x0020);
+                self.palette_bgr565[entry] = bgr565;
+                // RGB565: swap R and B channels (CEmu lcd_bgr565swap with mask=0x1F)
+                let diff = (bgr565 ^ (bgr565 >> 11)) & 0x1F;
+                self.palette_rgb565[entry] = bgr565 ^ diff ^ (diff << 11);
+            }
         }
     }
 
@@ -880,6 +916,63 @@ mod tests {
         lcd.write(0x3FF, 0x34);
         assert_eq!(lcd.read(0x3FE), 0x12);
         assert_eq!(lcd.read(0x3FF), 0x34);
+    }
+
+    #[test]
+    fn test_palette_preconversion_1555_to_565() {
+        let mut lcd = LcdController::new();
+
+        // Write pure red in 1555: bit15=0, B=00000, G=00000, R=11111
+        // 1555 raw = 0b0_00000_00000_11111 = 0x001F
+        lcd.write(0x200, 0x1F); // lo byte
+        lcd.write(0x201, 0x00); // hi byte
+
+        // After 1555→BGR565 conversion:
+        // color = 0x001F
+        // bgr565 = 0x001F + (0x001F & 0xFFE0) + ((0x001F >> 10) & 0x0020)
+        //        = 0x001F + 0x0000 + 0x0000 = 0x001F
+        // So BGR565 has R=11111 in bits 4:0, G=000000 in 10:5, B=00000 in 15:11
+        assert_eq!(lcd.palette_bgr565[0], 0x001F);
+        // RGB565 swap: R and B swapped → R in 15:11
+        // diff = (0x001F ^ (0x001F >> 11)) & 0x1F = (0x001F ^ 0) & 0x1F = 0x1F
+        // rgb565 = 0x001F ^ 0x1F ^ (0x1F << 11) = 0x0000 ^ 0xF800 = 0xF800
+        assert_eq!(lcd.palette_rgb565[0], 0xF800);
+
+        // Write pure blue in 1555: B=11111, G=00000, R=00000
+        // 1555 raw = 0b0_11111_00000_00000 = 0x7C00
+        lcd.write(0x202, 0x00);
+        lcd.write(0x203, 0x7C);
+
+        // bgr565 = 0x7C00 + (0x7C00 & 0xFFE0) + ((0x7C00 >> 10) & 0x0020)
+        //        = 0x7C00 + 0x7C00 + 0x0000 = 0xF800
+        // (0x7C00 >> 10 = 0x1F, & 0x0020 = 0 since bit 5 is clear)
+        // BGR565: B=11111 in 15:11, G=000000 in 10:5, R=00000 in 4:0
+        assert_eq!(lcd.palette_bgr565[1], 0xF800);
+
+        // Write a green-only 1555: B=00000, G=11111, R=00000
+        // 1555 raw = 0b0_00000_11111_00000 = 0x03E0
+        lcd.write(0x204, 0xE0);
+        lcd.write(0x205, 0x03);
+
+        // bgr565 = 0x03E0 + (0x03E0 & 0xFFE0) + ((0x03E0 >> 10) & 0x0020)
+        //        = 0x03E0 + 0x03E0 + 0x0000 = 0x07C0
+        // BGR565: B=00000 in 15:11, G=111110 in 10:5, R=00000 in 4:0
+        assert_eq!(lcd.palette_bgr565[2], 0x07C0);
+    }
+
+    #[test]
+    fn test_palette_for_mode_selects_by_bgr_bit() {
+        let mut lcd = LcdController::new();
+        // Write a known palette entry
+        lcd.write(0x200, 0x1F); // pure red 1555
+        lcd.write(0x201, 0x00);
+
+        // BGR=0 (default): should return BGR565 palette
+        assert_eq!(lcd.palette_for_mode()[0], lcd.palette_bgr565[0]);
+
+        // BGR=1 (set bit 8 of control): should return RGB565 palette
+        lcd.control |= ctrl::BGR;
+        assert_eq!(lcd.palette_for_mode()[0], lcd.palette_rgb565[0]);
     }
 
     #[test]
