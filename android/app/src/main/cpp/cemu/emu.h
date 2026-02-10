@@ -26,6 +26,9 @@ void emu_set_log_callback(emu_log_cb_t cb);
 // ROM loading (bytes only)
 int  emu_load_rom(Emu* emu, const uint8_t* data, size_t len);
 
+// Send .8xp/.8xv file (injects into flash archive before boot)
+int  emu_send_file(Emu* emu, const uint8_t* data, size_t len);
+
 void emu_reset(Emu* emu);
 
 // Power on (simulate ON key press+release)

@@ -33,6 +33,7 @@ void emu_destroy(Emu*);
 void emu_set_log_callback(emu_log_cb_t cb);
 
 int  emu_load_rom(Emu*, const uint8_t* data, size_t len);
+int  emu_send_file(Emu*, const uint8_t* data, size_t len);
 void emu_reset(Emu*);
 void emu_power_on(Emu*);
 

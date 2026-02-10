@@ -29,6 +29,7 @@ typedef Emu* (*backend_create_fn)();
 typedef void (*backend_destroy_fn)(Emu*);
 typedef void (*backend_set_log_callback_fn)(emu_log_cb_t);
 typedef int (*backend_load_rom_fn)(Emu*, const uint8_t*, size_t);
+typedef int (*backend_send_file_fn)(Emu*, const uint8_t*, size_t);
 typedef void (*backend_reset_fn)(Emu*);
 typedef void (*backend_power_on_fn)(Emu*);
 typedef int (*backend_run_cycles_fn)(Emu*, int);
@@ -51,6 +52,7 @@ struct BackendInterface {
     backend_destroy_fn destroy = nullptr;
     backend_set_log_callback_fn set_log_callback = nullptr;
     backend_load_rom_fn load_rom = nullptr;
+    backend_send_file_fn send_file = nullptr;
     backend_reset_fn reset = nullptr;
     backend_power_on_fn power_on = nullptr;
     backend_run_cycles_fn run_cycles = nullptr;
@@ -127,6 +129,7 @@ static bool loadBackend(const std::string& backendName) {
     LOAD_FUNC(destroy)
     LOAD_FUNC(set_log_callback)
     LOAD_FUNC(load_rom)
+    LOAD_FUNC(send_file)
     LOAD_FUNC(reset)
     LOAD_FUNC(power_on)
     LOAD_FUNC(run_cycles)
@@ -341,6 +344,46 @@ Java_com_calc_emulator_EmulatorBridge_nativeLoadRom(JNIEnv* env, jobject thiz, j
 
     if (result != 0) {
         LOGE("nativeLoadRom: load_rom returned %d", result);
+    }
+    return result;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_calc_emulator_EmulatorBridge_nativeSendFile(JNIEnv* env, jobject thiz, jlong handle, jbyteArray fileBytes) {
+    Emu* emu = toEmu(handle);
+    if (emu == nullptr) {
+        LOGE("nativeSendFile: null handle");
+        return -1;
+    }
+
+    jsize len = env->GetArrayLength(fileBytes);
+    if (len <= 0) {
+        LOGE("nativeSendFile: empty file data");
+        return -2;
+    }
+
+    jbyte* data = env->GetByteArrayElements(fileBytes, nullptr);
+    if (data == nullptr) {
+        LOGE("nativeSendFile: failed to get byte array");
+        return -3;
+    }
+
+    LOGI("Sending file: %d bytes", static_cast<int>(len));
+
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_backend.isLoaded()) {
+        env->ReleaseByteArrayElements(fileBytes, data, JNI_ABORT);
+        return -4;
+    }
+
+    int result = g_backend.send_file(emu, reinterpret_cast<const uint8_t*>(data), static_cast<size_t>(len));
+
+    env->ReleaseByteArrayElements(fileBytes, data, JNI_ABORT);
+
+    if (result < 0) {
+        LOGE("nativeSendFile: send_file returned %d", result);
+    } else {
+        LOGI("nativeSendFile: injected %d entries", result);
     }
     return result;
 }

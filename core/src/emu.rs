@@ -87,6 +87,33 @@ fn check_armed_trace_on_wake(was_halted: bool, is_halted: bool) {
 pub const SCREEN_WIDTH: usize = 320;
 pub const SCREEN_HEIGHT: usize = 240;
 
+/// Convert RGB565 (R=15:11, G=10:5, B=4:0) to ARGB8888.
+/// Matches CEmu's lcd_rgb565out + lcd_argb8888out.
+#[inline]
+fn rgb565_to_argb8888(rgb565: u16) -> u32 {
+    let r = ((rgb565 >> 11) & 0x1F) as u8;
+    let g = ((rgb565 >> 5) & 0x3F) as u8;
+    let b = (rgb565 & 0x1F) as u8;
+    let r8 = (r << 3) | (r >> 2);
+    let g8 = (g << 2) | (g >> 4);
+    let b8 = (b << 3) | (b >> 2);
+    0xFF000000 | ((r8 as u32) << 16) | ((g8 as u32) << 8) | (b8 as u32)
+}
+
+/// Convert BGR565 (B=15:11, G=10:5, R=4:0) to ARGB8888.
+/// The LCD palette stores colors in BGR565 format after 1555→565 conversion.
+/// Matches CEmu's lcd_rgb565out applied to BGR-ordered data.
+#[inline]
+fn bgr565_to_argb8888(bgr565: u16) -> u32 {
+    let b = ((bgr565 >> 11) & 0x1F) as u8;
+    let g = ((bgr565 >> 5) & 0x3F) as u8;
+    let r = (bgr565 & 0x1F) as u8;
+    let r8 = (r << 3) | (r >> 2);
+    let g8 = (g << 2) | (g >> 4);
+    let b8 = (b << 3) | (b >> 2);
+    0xFF000000 | ((r8 as u32) << 16) | ((g8 as u32) << 8) | (b8 as u32)
+}
+
 /// Cycles after which boot is considered complete and TI-OS initialization can happen
 /// Boot completes at ~62M cycles; we wait a bit longer to ensure TI-OS is ready
 const BOOT_COMPLETE_CYCLES: u64 = 65_000_000;
@@ -355,6 +382,188 @@ impl Emu {
         self.rom_loaded = true;
         log_evt!("ROM_LOADED bytes={}", data.len());
         self.reset();
+        Ok(())
+    }
+
+    /// Send a .8xp/.8xv file to the emulator by injecting into flash archive.
+    ///
+    /// Must be called after `load_rom()` and before `power_on()`. The variable
+    /// entries are written to the flash archive region (0x0C0000+) in the format
+    /// the TI-OS expects. When the OS boots, it scans flash and discovers them.
+    ///
+    /// Returns Ok(count) with the number of entries injected, or an error code.
+    pub fn send_file(&mut self, file_data: &[u8]) -> Result<usize, i32> {
+        use crate::ti_file::TiFile;
+
+        if !self.rom_loaded {
+            return Err(-10); // ROM not loaded
+        }
+        if self.powered_on {
+            return Err(-13); // Must inject before boot
+        }
+
+        let ti_file = TiFile::parse(file_data).map_err(|e| {
+            log_evt!("SEND_FILE_PARSE_ERROR: {}", e);
+            -11 // Parse error
+        })?;
+
+        let count = ti_file.entries.len();
+        for entry in &ti_file.entries {
+            self.inject_archive_entry(entry)?;
+        }
+
+        Ok(count)
+    }
+
+    /// Find the first free address in the flash archive region.
+    ///
+    /// Flash archive layout per sector (64KB):
+    ///   [sector_status_byte] [entry1] [entry2] ... [0xFF = free space]
+    ///
+    /// The sector status byte at offset 0 of each 64KB sector is NOT an entry.
+    /// Entries start at offset 1. Each entry: [flag] [size_lo] [size_hi] [payload...]
+    /// TI-OS stops scanning when it hits 0xFF.
+    fn find_archive_free_addr(&self) -> Option<u32> {
+        const ARCHIVE_START: u32 = 0x0C0000;
+        const ARCHIVE_END: u32 = 0x3B0000;
+        const SECTOR_SIZE: u32 = 0x10000; // 64KB
+
+        let mut sector = ARCHIVE_START;
+        while sector < ARCHIVE_END {
+            let status = self.bus.flash.peek(sector);
+            if status == 0xFF {
+                // Empty sector — write sector status byte + entries start at byte 1
+                return Some(sector);
+            }
+
+            // Sector has data (status 0xFC, 0xF0, etc.) — scan entries from byte 1
+            let mut addr = sector + 1;
+            let sector_end = sector + SECTOR_SIZE;
+            while addr < sector_end {
+                let flag = self.bus.flash.peek(addr);
+                if flag == 0xFF {
+                    // Free space within this sector
+                    return Some(addr);
+                }
+                if flag == 0xFC || flag == 0xF0 || flag == 0xFE {
+                    // Entry: skip using size field
+                    let size = u16::from_le_bytes([
+                        self.bus.flash.peek(addr + 1),
+                        self.bus.flash.peek(addr + 2),
+                    ]) as u32;
+                    if size > 0 && size < SECTOR_SIZE {
+                        addr += 3 + size;
+                    } else {
+                        // Invalid size — sector might be corrupt, skip to next
+                        break;
+                    }
+                } else {
+                    // Unknown byte — skip to next sector
+                    break;
+                }
+            }
+            sector += SECTOR_SIZE;
+        }
+        None
+    }
+
+    /// Inject a single variable entry into the flash archive.
+    ///
+    /// Archive entry format (in flash, per WikiTI):
+    ///   [flag=0xFC] [size_lo] [size_hi] [type1] [type2=0] [version]
+    ///   [addr_lo] [addr_mid] [addr_hi] [namelen] [name bytes...] [data...]
+    ///
+    /// The flag byte 0xFC marks a valid entry. The 2-byte size (LE) is the
+    /// byte count of everything after the 3-byte header (flag+size).
+    /// The 3-byte address field is self-referential: it points to the flag byte.
+    fn inject_archive_entry(&mut self, entry: &crate::ti_file::TiVarEntry) -> Result<(), i32> {
+        const ARCHIVE_END: u32 = 0x3B0000;
+        const SECTOR_SIZE: u32 = 0x10000; // 64KB
+
+        let free_addr = self.find_archive_free_addr().ok_or(-12)?; // -12 = no space
+
+        let name_len = entry.name_len();
+        // Payload after the 3-byte header (flag+size):
+        //   type1(1) + type2(1) + version(1) + addr(3) + namelen(1) + name(N) + data
+        let payload_len = 6 + 1 + name_len + entry.data.len();
+        // Total entry: 3-byte header + payload
+        let total_len = 3 + payload_len;
+
+        let mut write_addr = free_addr;
+
+        // If free_addr is at a sector boundary, byte 0 is the sector status byte.
+        // Write 0xFC (sector with valid data) and start entries at byte 1.
+        let sector_offset = write_addr & (SECTOR_SIZE - 1);
+        if sector_offset == 0 {
+            self.bus.flash.write_direct(write_addr, 0xFC);
+            write_addr += 1;
+        }
+
+        // Check sector boundary: entry must not cross a 64KB boundary
+        let sector_start = write_addr & !(SECTOR_SIZE - 1);
+        let sector_end = sector_start + SECTOR_SIZE;
+        if write_addr + total_len as u32 > sector_end {
+            // Skip to next sector — write sector status byte and start at byte 1
+            write_addr = sector_end;
+            if write_addr + 1 + total_len as u32 > ARCHIVE_END {
+                return Err(-12); // No space
+            }
+            self.bus.flash.write_direct(write_addr, 0xFC);
+            write_addr += 1;
+        }
+
+        // The self-referential address points to the flag byte (entry start)
+        let self_addr = write_addr;
+
+        // Write the entry
+        let mut offset = write_addr;
+        // Flag byte: 0xFC = valid entry
+        self.bus.flash.write_direct(offset, 0xFC);
+        offset += 1;
+        // 2-byte size (LE): byte count of everything after the 3-byte header
+        self.bus.flash.write_direct(offset, payload_len as u8);
+        offset += 1;
+        self.bus.flash.write_direct(offset, (payload_len >> 8) as u8);
+        offset += 1;
+        // type1
+        self.bus.flash.write_direct(offset, entry.var_type.as_u8());
+        offset += 1;
+        // type2
+        self.bus.flash.write_direct(offset, 0x00);
+        offset += 1;
+        // version
+        self.bus.flash.write_direct(offset, entry.version);
+        offset += 1;
+        // 3-byte self-referential address (little-endian)
+        self.bus.flash.write_direct(offset, self_addr as u8);
+        offset += 1;
+        self.bus.flash.write_direct(offset, (self_addr >> 8) as u8);
+        offset += 1;
+        self.bus.flash.write_direct(offset, (self_addr >> 16) as u8);
+        offset += 1;
+        // namelen
+        self.bus.flash.write_direct(offset, name_len as u8);
+        offset += 1;
+        // name bytes
+        for i in 0..name_len {
+            self.bus.flash.write_direct(offset, entry.name[i]);
+            offset += 1;
+        }
+        // data (includes the 2-byte size prefix for programs/appvars)
+        for &byte in &entry.data {
+            self.bus.flash.write_direct(offset, byte);
+            offset += 1;
+        }
+
+        log_evt!(
+            "ARCHIVE_INJECT name={} type=0x{:02X} addr=0x{:06X} total={} payload={}",
+            entry.name_str(),
+            entry.var_type.as_u8(),
+            self_addr,
+            total_len,
+            payload_len,
+        );
+
         Ok(())
     }
 
@@ -695,6 +904,16 @@ impl Emu {
             let cpu_speed = self.bus.ports.control.cpu_speed();
             self.scheduler.set_cpu_speed(cpu_speed);
 
+            // Handle CPU_SIGNAL_ANY_KEY equivalent (same as run_cycles)
+            if self.cpu.any_key_wake {
+                let key_state = self.bus.key_state().clone();
+                let should_interrupt = self.bus.ports.keypad.any_key_check(&key_state);
+                if should_interrupt {
+                    use crate::peripherals::interrupt::sources;
+                    self.bus.ports.interrupt.raise(sources::KEYPAD);
+                }
+            }
+
             let was_halted = self.cpu.halted;
             let cycles_used = self.cpu.step(&mut self.bus);
             check_armed_trace_on_wake(was_halted, self.cpu.halted);
@@ -734,6 +953,11 @@ impl Emu {
 
             if self.tick_peripherals(cycles_used) {
                 self.cpu.irq_pending = true;
+            }
+
+            // Stop if device went off
+            if self.is_off() {
+                break;
             }
 
             // HALT fast-forward (same batched approach as run_cycles)
@@ -1382,13 +1606,48 @@ impl Emu {
         self.bus.ports.keypad.mode()
     }
 
-    /// Render the current VRAM contents to the framebuffer
-    /// Converts RGB565 to ARGB8888
+    /// Render the current VRAM contents to the framebuffer.
+    /// Supports both 8bpp indexed color (used by graphx games) and 16bpp RGB565 (used by TI-OS).
     pub fn render_frame(&mut self) {
         let upbase = self.bus.ports.lcd.upbase();
+        let bpp_mode = self.bus.ports.lcd.bpp_mode();
 
-        // VRAM lives in the RAM region — read directly from the backing store
-        // instead of 153,600 peek_byte calls through the bus decode path.
+        match bpp_mode {
+            3 => self.render_frame_8bpp(upbase),
+            _ => self.render_frame_16bpp(upbase),
+        }
+    }
+
+    /// Render 8bpp indexed color mode (BPP=3).
+    /// Each VRAM byte is a palette index. The palette at LCD 0xE30200 maps indices to colors.
+    /// This is what the graphx library and all CE games use.
+    fn render_frame_8bpp(&mut self, upbase: u32) {
+        let ram_offset = upbase.wrapping_sub(crate::memory::addr::RAM_START) as usize;
+        let needed = SCREEN_WIDTH * SCREEN_HEIGHT; // 1 byte per pixel
+        let ram_data = self.bus.ram.data();
+        // Copy palette to avoid borrow conflict in fallback path
+        let palette = *self.bus.ports.lcd.palette_for_mode();
+
+        if ram_offset < ram_data.len() && ram_offset + needed <= ram_data.len() {
+            let vram = &ram_data[ram_offset..ram_offset + needed];
+            for (i, &index) in vram.iter().enumerate() {
+                let bgr565 = palette[index as usize];
+                self.framebuffer[i] = bgr565_to_argb8888(bgr565);
+            }
+        } else {
+            // Fallback for out-of-range UPBASE
+            for i in 0..(SCREEN_WIDTH * SCREEN_HEIGHT) {
+                let vram_addr = upbase + i as u32;
+                let index = self.bus.peek_byte(vram_addr);
+                let bgr565 = palette[index as usize];
+                self.framebuffer[i] = bgr565_to_argb8888(bgr565);
+            }
+        }
+    }
+
+    /// Render 16bpp direct color mode (BPP=4+).
+    /// Each pixel is 2 bytes of RGB565 in VRAM. Used by TI-OS boot screen.
+    fn render_frame_16bpp(&mut self, upbase: u32) {
         let ram_offset = upbase.wrapping_sub(crate::memory::addr::RAM_START) as usize;
         let needed = SCREEN_WIDTH * SCREEN_HEIGHT * 2;
         let ram_data = self.bus.ram.data();
@@ -1397,13 +1656,7 @@ impl Emu {
             let vram = &ram_data[ram_offset..ram_offset + needed];
             for (i, chunk) in vram.chunks_exact(2).enumerate() {
                 let rgb565 = u16::from_le_bytes([chunk[0], chunk[1]]);
-                let r = ((rgb565 >> 11) & 0x1F) as u8;
-                let g = ((rgb565 >> 5) & 0x3F) as u8;
-                let b = (rgb565 & 0x1F) as u8;
-                let r8 = (r << 3) | (r >> 2);
-                let g8 = (g << 2) | (g >> 4);
-                let b8 = (b << 3) | (b >> 2);
-                self.framebuffer[i] = 0xFF000000 | ((r8 as u32) << 16) | ((g8 as u32) << 8) | (b8 as u32);
+                self.framebuffer[i] = rgb565_to_argb8888(rgb565);
             }
         } else {
             // Fallback for out-of-range UPBASE (e.g. before LCD is configured)
@@ -1414,13 +1667,7 @@ impl Emu {
                     let lo = self.bus.peek_byte(vram_addr) as u16;
                     let hi = self.bus.peek_byte(vram_addr + 1) as u16;
                     let rgb565 = lo | (hi << 8);
-                    let r = ((rgb565 >> 11) & 0x1F) as u8;
-                    let g = ((rgb565 >> 5) & 0x3F) as u8;
-                    let b = (rgb565 & 0x1F) as u8;
-                    let r8 = (r << 3) | (r >> 2);
-                    let g8 = (g << 2) | (g >> 4);
-                    let b8 = (b << 3) | (b >> 2);
-                    self.framebuffer[y * SCREEN_WIDTH + x] = 0xFF000000 | ((r8 as u32) << 16) | ((g8 as u32) << 8) | (b8 as u32);
+                    self.framebuffer[y * SCREEN_WIDTH + x] = rgb565_to_argb8888(rgb565);
                 }
             }
         }
@@ -1709,6 +1956,11 @@ impl Emu {
         self.bus.cycles()
     }
 
+    /// Get raw flash data (4MB) — useful for baking programs into a ROM file
+    pub fn flash_data(&self) -> &[u8] {
+        self.bus.flash.data()
+    }
+
     /// Peek at a memory byte without affecting emulation state
     pub fn peek_byte(&mut self, addr: u32) -> u8 {
         self.bus.peek_byte(addr)
@@ -1747,9 +1999,10 @@ impl Emu {
         // If key < 0x100, shift to high byte (CEmu convention)
         let key = if key < 0x100 { key << 8 } else { key };
 
-        self.poke_byte(CE_KBD_KEY, (key >> 8) as u8);
-        self.poke_byte(CE_KEY_EXTEND, (key & 0xFF) as u8);
-        self.poke_byte(CE_GRAPH_FLAGS2, flags | CE_KEY_READY);
+        // Use bus.poke_byte to bypass memory protection and cycle accounting
+        self.bus.poke_byte(CE_KBD_KEY, (key >> 8) as u8);
+        self.bus.poke_byte(CE_KEY_EXTEND, (key & 0xFF) as u8);
+        self.bus.poke_byte(CE_GRAPH_FLAGS2, flags | CE_KEY_READY);
 
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -2413,5 +2666,127 @@ mod tests {
 
         // CPU should still be halted (regular IRQ can't wake with DI)
         assert!(emu.cpu.halted);
+    }
+
+    /// Helper: create a minimal .8xp from components
+    fn make_test_8xp(var_type: u8, name: &[u8; 8], version: u8, flag: u8, var_data: &[u8]) -> Vec<u8> {
+        let mut file = Vec::new();
+        file.extend_from_slice(b"**TI83F*");
+        file.extend_from_slice(&[0x1A, 0x0A, 0x00]);
+        file.extend_from_slice(&[0u8; 42]);
+        let entry_len = 17 + var_data.len();
+        file.extend_from_slice(&(entry_len as u16).to_le_bytes());
+        file.extend_from_slice(&13u16.to_le_bytes());
+        file.extend_from_slice(&(var_data.len() as u16).to_le_bytes());
+        file.push(var_type);
+        file.extend_from_slice(name);
+        file.push(version);
+        file.push(flag);
+        file.extend_from_slice(&(var_data.len() as u16).to_le_bytes());
+        file.extend_from_slice(var_data);
+        let checksum: u16 = file[55..].iter().fold(0u16, |acc, &b| acc.wrapping_add(b as u16));
+        file.extend_from_slice(&checksum.to_le_bytes());
+        file
+    }
+
+    #[test]
+    fn test_send_file_requires_rom() {
+        let mut emu = Emu::new();
+        let file = make_test_8xp(0x05, b"TEST\0\0\0\0", 0, 0, &[0, 0, 0xEF, 0x7B]);
+        assert_eq!(emu.send_file(&file), Err(-10));
+    }
+
+    #[test]
+    fn test_send_file_basic() {
+        let mut emu = Emu::new();
+        // Load a minimal ROM (all 0xFF flash)
+        let rom = vec![0xFF; 1024];
+        emu.load_rom(&rom).unwrap();
+
+        let var_data = vec![0x02, 0x00, 0xEF, 0x7B]; // size=2, ASM marker
+        let file = make_test_8xp(0x05, b"TEST\0\0\0\0", 0, 0, &var_data);
+
+        let result = emu.send_file(&file);
+        assert_eq!(result, Ok(1));
+
+        // Verify the entry was written to the archive region (0x0C0000)
+        // First byte should be the type (0x05 = Program)
+        assert_eq!(emu.bus.flash.peek(0x0C0000), 0x05);
+        // type2 = 0
+        assert_eq!(emu.bus.flash.peek(0x0C0001), 0x00);
+        // version = 0
+        assert_eq!(emu.bus.flash.peek(0x0C0002), 0x00);
+        // Self-referential address = 0x0C0000 (LE)
+        assert_eq!(emu.bus.flash.peek(0x0C0003), 0x00);
+        assert_eq!(emu.bus.flash.peek(0x0C0004), 0x00);
+        assert_eq!(emu.bus.flash.peek(0x0C0005), 0x0C);
+        // namelen = 4 ("TEST")
+        assert_eq!(emu.bus.flash.peek(0x0C0006), 0x04);
+        // name = "TEST"
+        assert_eq!(emu.bus.flash.peek(0x0C0007), b'T');
+        assert_eq!(emu.bus.flash.peek(0x0C0008), b'E');
+        assert_eq!(emu.bus.flash.peek(0x0C0009), b'S');
+        assert_eq!(emu.bus.flash.peek(0x0C000A), b'T');
+        // Data starts at 0x0C000B: [0x02, 0x00, 0xEF, 0x7B]
+        assert_eq!(emu.bus.flash.peek(0x0C000B), 0x02);
+        assert_eq!(emu.bus.flash.peek(0x0C000C), 0x00);
+        assert_eq!(emu.bus.flash.peek(0x0C000D), 0xEF);
+        assert_eq!(emu.bus.flash.peek(0x0C000E), 0x7B);
+        // Next byte should still be 0xFF (free)
+        assert_eq!(emu.bus.flash.peek(0x0C000F), 0xFF);
+    }
+
+    #[test]
+    fn test_send_file_multiple() {
+        let mut emu = Emu::new();
+        let rom = vec![0xFF; 1024];
+        emu.load_rom(&rom).unwrap();
+
+        let file1 = make_test_8xp(0x05, b"PROG1\0\0\0", 0, 0, &[0x01, 0x00, 0xAA]);
+        let file2 = make_test_8xp(0x15, b"APPVAR\0\0", 0, 0x80, &[0x02, 0x00, 0xBB, 0xCC]);
+
+        assert_eq!(emu.send_file(&file1), Ok(1));
+        assert_eq!(emu.send_file(&file2), Ok(1));
+
+        // First entry at 0x0C0000
+        assert_eq!(emu.bus.flash.peek(0x0C0000), 0x05); // Program type
+        // Second entry should follow the first
+        // First entry size: 6 + 1 + 5 + 3 = 15 bytes, so next at 0x0C000F
+        let second_start = 0x0C0000u32 + 6 + 1 + 5 + 3;
+        assert_eq!(emu.bus.flash.peek(second_start), 0x15); // AppVar type
+    }
+
+    #[test]
+    fn test_send_file_rejects_after_poweron() {
+        let mut emu = Emu::new();
+        let rom = vec![0xFF; 1024];
+        emu.load_rom(&rom).unwrap();
+        emu.power_on();
+
+        let file = make_test_8xp(0x05, b"TEST\0\0\0\0", 0, 0, &[0, 0]);
+        assert_eq!(emu.send_file(&file), Err(-13));
+    }
+
+    #[test]
+    fn test_send_real_doom_8xp() {
+        let path = "/tmp/DOOM.8xp";
+        if let Ok(data) = std::fs::read(path) {
+            let mut emu = Emu::new();
+            let rom = vec![0xFF; 1024];
+            emu.load_rom(&rom).unwrap();
+
+            let result = emu.send_file(&data);
+            assert_eq!(result, Ok(1));
+
+            // Verify the DOOM entry was written at 0x0C0000
+            assert_eq!(emu.bus.flash.peek(0x0C0000), 0x06); // Protected program
+            // namelen = 4
+            assert_eq!(emu.bus.flash.peek(0x0C0006), 0x04);
+            // name = "DOOM"
+            assert_eq!(emu.bus.flash.peek(0x0C0007), b'D');
+            assert_eq!(emu.bus.flash.peek(0x0C0008), b'O');
+            assert_eq!(emu.bus.flash.peek(0x0C0009), b'O');
+            assert_eq!(emu.bus.flash.peek(0x0C000A), b'M');
+        }
     }
 }
