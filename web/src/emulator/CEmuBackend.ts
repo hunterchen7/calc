@@ -144,19 +144,18 @@ export class CEmuBackend implements EmulatorBackend {
       return new Uint8Array(320 * 240 * 4);
     }
 
-    // CEmu framebuffer is 320x240 RGBA (but may be in different order)
+    // CEmu panel.display is 320x240 ARGB8888 (A=bits 31-24, R=23-16, G=15-8, B=7-0)
     const width = 320;
     const height = 240;
     const result = new Uint8Array(width * height * 4);
 
-    // Copy and convert from CEmu's format (ABGR) to RGBA
+    // Convert from CEmu's ARGB8888 to canvas RGBA
     const heapu32 = new Uint32Array(this.module.HEAPU8.buffer, framePtr, width * height);
     for (let i = 0; i < width * height; i++) {
       const pixel = heapu32[i];
-      // CEmu uses ABGR format, we need RGBA
-      result[i * 4 + 0] = (pixel >> 0) & 0xFF;  // R (from B position in ABGR)
+      result[i * 4 + 0] = (pixel >> 16) & 0xFF; // R
       result[i * 4 + 1] = (pixel >> 8) & 0xFF;  // G
-      result[i * 4 + 2] = (pixel >> 16) & 0xFF; // B (from R position in ABGR)
+      result[i * 4 + 2] = (pixel >> 0) & 0xFF;  // B
       result[i * 4 + 3] = 255; // A (always opaque)
     }
 
