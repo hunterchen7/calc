@@ -16,9 +16,9 @@
 //!   [0]: Timer0 enable, [1]: Timer0 clock (0=CPU, 1=32K), [2]: Timer0 overflow enable
 //!   [3]: Timer1 enable, [4]: Timer1 clock, [5]: Timer1 overflow enable
 //!   [6]: Timer2 enable, [7]: Timer2 clock, [8]: Timer2 overflow enable
-//!   [9]: Timer0 count direction invert
-//!   [10]: Timer1 count direction invert
-//!   [11]: Timer2 count direction invert
+//!   [9]: Timer0 count direction (0=down, 1=up)
+//!   [10]: Timer1 count direction (0=down, 1=up)
+//!   [11]: Timer2 count direction (0=down, 1=up)
 //!
 //! Status bits (3 bits per timer):
 //!   [0]: Timer0 match0, [1]: Timer0 match1, [2]: Timer0 overflow/zero
@@ -114,9 +114,11 @@ impl GeneralTimers {
         self.control & (1 << (index * 3 + 1)) != 0
     }
 
-    /// Check if count direction is inverted (down) for timer
-    /// CEmu: control bit [9+index]
-    fn is_inverted(&self, index: usize) -> bool {
+    /// Check if timer counts UP (bit set) vs DOWN (bit clear, default).
+    /// CEmu: `invert = (gpt.control >> (9 + index) & 1) ? ~0 : 0`
+    ///   bit SET → invert=~0 → `counter -= ~0` = counter++ → counts UP
+    ///   bit CLEAR → invert=0 → `counter -= 1` → counts DOWN
+    fn counts_up(&self, index: usize) -> bool {
         self.control & (1 << (9 + index)) != 0
     }
 
@@ -239,13 +241,29 @@ impl GeneralTimers {
             }
 
             let old_counter = self.timer[i].counter;
-            let inverted = self.is_inverted(i);
+            let count_up = self.counts_up(i);
 
             // Accumulate new status bits for this timer in a local variable
             let mut new_status: u32 = 0;
 
-            if inverted {
-                // Count down
+            if count_up {
+                // Count up (bit set)
+                let (new_val, overflow) = self.timer[i].counter.overflowing_add(ticks);
+                self.timer[i].counter = new_val;
+
+                // Check match conditions
+                new_status |= self.check_matches_up_bits(i, old_counter, new_val, overflow);
+
+                if overflow {
+                    // Check if overflow/reset enable is set
+                    if self.control & (1 << (i * 3 + 2)) != 0 {
+                        self.timer[i].counter = self.timer[i].reset.wrapping_add(new_val);
+                    }
+                    // Set overflow/zero status bit
+                    new_status |= 1 << (i * 3 + 2);
+                }
+            } else {
+                // Count down (bit clear, default)
                 if self.timer[i].counter >= ticks {
                     self.timer[i].counter -= ticks;
 
@@ -261,22 +279,6 @@ impl GeneralTimers {
                         self.timer[i].counter = self.timer[i].reset.wrapping_sub(remaining);
                     } else {
                         self.timer[i].counter = 0xFFFFFFFF_u32.wrapping_sub(remaining - 1);
-                    }
-                    // Set overflow/zero status bit
-                    new_status |= 1 << (i * 3 + 2);
-                }
-            } else {
-                // Count up
-                let (new_val, overflow) = self.timer[i].counter.overflowing_add(ticks);
-                self.timer[i].counter = new_val;
-
-                // Check match conditions
-                new_status |= self.check_matches_up_bits(i, old_counter, new_val, overflow);
-
-                if overflow {
-                    // Check if overflow/reset enable is set
-                    if self.control & (1 << (i * 3 + 2)) != 0 {
-                        self.timer[i].counter = self.timer[i].reset.wrapping_add(new_val);
                     }
                     // Set overflow/zero status bit
                     new_status |= 1 << (i * 3 + 2);
@@ -521,8 +523,8 @@ mod tests {
     #[test]
     fn test_tick_count_up() {
         let mut gpt = GeneralTimers::new();
-        // Enable timer 0, count up (not inverted)
-        gpt.control = 0x01; // enable timer 0
+        // Enable timer 0, count up (bit 9 set)
+        gpt.control = 0x01 | (1 << 9); // enable + count up
         gpt.timer[0].counter = 0;
 
         let fired = gpt.tick(100, 3, 0);
@@ -534,8 +536,8 @@ mod tests {
     #[test]
     fn test_tick_count_down() {
         let mut gpt = GeneralTimers::new();
-        // Enable timer 0, invert (count down)
-        gpt.control = 0x01 | (1 << 9); // enable + direction invert
+        // Enable timer 0, count down (default, bit 9 NOT set)
+        gpt.control = 0x01; // enable only
         gpt.timer[0].counter = 100;
 
         let fired = gpt.tick(50, 3, 0);
@@ -561,8 +563,8 @@ mod tests {
     #[test]
     fn test_tick_overflow_sets_delay_pipeline() {
         let mut gpt = GeneralTimers::new();
-        // Enable timer 0, count up, auto-reload
-        gpt.control = 0x01 | (1 << 2); // enable + overflow enable
+        // Enable timer 0, count up (bit 9), auto-reload
+        gpt.control = 0x01 | (1 << 2) | (1 << 9); // enable + overflow enable + count up
         gpt.timer[0].counter = 0xFFFFFFFE;
         gpt.mask = 0x04; // Mask timer 0 overflow bit
 
@@ -582,8 +584,8 @@ mod tests {
     #[test]
     fn test_tick_underflow_with_reset() {
         let mut gpt = GeneralTimers::new();
-        // Enable timer 0, count down, auto-reload
-        gpt.control = 0x01 | (1 << 2) | (1 << 9); // enable + overflow + invert
+        // Enable timer 0, count down (default), auto-reload
+        gpt.control = 0x01 | (1 << 2); // enable + overflow (bit 9 NOT set = count down)
         gpt.timer[0].counter = 5;
         gpt.timer[0].reset = 1000;
 
@@ -606,8 +608,8 @@ mod tests {
     #[test]
     fn test_match_interrupt_via_delay() {
         let mut gpt = GeneralTimers::new();
-        // Enable timer 0, count up
-        gpt.control = 0x01;
+        // Enable timer 0, count up (bit 9)
+        gpt.control = 0x01 | (1 << 9);
         gpt.timer[0].counter = 0;
         gpt.timer[0].match_val[0] = 50;
         gpt.mask = 0x01; // Mask match0 for timer 0
@@ -626,8 +628,8 @@ mod tests {
     #[test]
     fn test_delay_pipeline_tiers() {
         let mut gpt = GeneralTimers::new();
-        // Enable timer 0, count up
-        gpt.control = 0x01;
+        // Enable timer 0, count up (bit 9)
+        gpt.control = 0x01 | (1 << 9);
         gpt.timer[0].counter = 0;
         gpt.timer[0].match_val[0] = 10;
 
@@ -645,8 +647,9 @@ mod tests {
     #[test]
     fn test_delay_pipeline_multiple_timers() {
         let mut gpt = GeneralTimers::new();
-        // Enable all 3 timers, count up
-        gpt.control = 0x01 | 0x08 | 0x40; // enable bits for timer 0, 1, 2
+        // Enable all 3 timers, count up (bits 9,10,11)
+        gpt.control = 0x01 | 0x08 | 0x40  // enable bits for timer 0, 1, 2
+                    | (1 << 9) | (1 << 10) | (1 << 11); // count up for all 3
         gpt.timer[0].counter = 0;
         gpt.timer[0].match_val[0] = 10;
         gpt.timer[1].counter = 0;

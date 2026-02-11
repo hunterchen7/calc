@@ -810,8 +810,10 @@ mod tests {
     fn test_tick_timer_interrupt() {
         let mut p = Peripherals::new();
 
-        // New control format: bit 0=enable, bit 2=overflow enable (count up = not inverted)
+        // Control: bit 0=enable, bit 2=overflow enable, bit 9=count up
+        // Write low byte: 0x05 (enable + overflow), then high byte with bit 9 (count up)
         p.write_test(TIMER_BASE + 0x30, 0x05); // Timer 0: enable + overflow
+        p.write_test(TIMER_BASE + 0x31, 0x02); // bit 9 = count up (bit 1 of byte 1)
         // Set timer mask to trigger on overflow (bit 2 = timer 0 overflow)
         p.write_test(TIMER_BASE + 0x38, 0x04);
         // Set counter to max via write API
@@ -896,11 +898,12 @@ mod tests {
     fn test_tick_multiple_timers() {
         let mut p = Peripherals::new();
 
-        // New control: enable all 3 timers (bits 0,3,6) + overflow enable (bits 2,5,8)
-        // All count up (not inverted)
+        // Enable all 3 timers (bits 0,3,6) + overflow enable (bits 2,5,8)
+        // + count up for all (bits 9,10,11)
         let ctrl: u32 = 0x01 | 0x04   // Timer 0: enable + overflow
                        | 0x08 | 0x20  // Timer 1: enable + overflow
-                       | 0x40 | 0x100; // Timer 2: enable + overflow
+                       | 0x40 | 0x100 // Timer 2: enable + overflow
+                       | (1 << 9) | (1 << 10) | (1 << 11); // All count up
         p.write_test(TIMER_BASE + 0x30, (ctrl & 0xFF) as u8);
         p.write_test(TIMER_BASE + 0x31, ((ctrl >> 8) & 0xFF) as u8);
 
@@ -953,8 +956,9 @@ mod tests {
     fn test_tick_no_interrupts_when_disabled() {
         let mut p = Peripherals::new();
 
-        // Enable timer 0 with overflow in new control format
+        // Enable timer 0 with overflow + count up
         p.write_test(TIMER_BASE + 0x30, 0x05); // enable + overflow
+        p.write_test(TIMER_BASE + 0x31, 0x02); // bit 9 = count up
         p.write_test(TIMER_BASE + 0x38, 0x04); // mask overflow bit
         // Set counter to max
         p.write_test(TIMER_BASE, 0xFF);
