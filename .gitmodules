@@ -1,0 +1,3 @@
+[submodule "games"]
+	path = games
+	url = https://github.com/hunterchen7/ce-games.git
