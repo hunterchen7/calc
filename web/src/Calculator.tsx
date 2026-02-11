@@ -124,6 +124,8 @@ export function Calculator({
   const [backendName, setBackendName] = useState("");
   const [speed, setSpeed] = useState(1); // Speed multiplier (0.25x to 4x)
   const [programFiles, setProgramFiles] = useState<string[]>([]); // Names of loaded .8xp/.8xv files
+  const [isDragging, setIsDragging] = useState(false);
+  const dragCounterRef = useRef(0);
   const lastFrameTime = useRef(0);
   const frameCount = useRef(0);
   const romDataRef = useRef<Uint8Array | null>(null);
@@ -132,6 +134,7 @@ export function Calculator({
   const storageRef = useRef<StateStorage | null>(null);
   const romHashRef = useRef<string | null>(null);
   const backendTypeRef = useRef<BackendType>(defaultBackend);
+  const programInputRef = useRef<HTMLInputElement>(null);
 
   // Keep backendTypeRef in sync
   useEffect(() => {
@@ -412,24 +415,37 @@ export function Calculator({
   useEffect(() => {
     if (!isRunning || !romLoaded || !backendRef.current) return;
 
-    let accumulator = 0;
     let slowFrameCount = 0;
     let totalFrames = 0;
+    let timeAccumulator = 0;
+    let lastLoopTime = 0;
+    const TARGET_FRAME_MS = 1000 / 60; // 16.67ms per emulated frame
 
-    const loop = () => {
+    const loop = (timestamp: number) => {
       const backend = backendRef.current;
       if (!backend) return;
 
+      // Time-accumulator approach: track how much real time has passed
+      // and run exactly that many emulated frames (scaled by speed).
+      // This ensures precise 60fps regardless of display refresh rate.
+      if (lastLoopTime > 0) {
+        let delta = timestamp - lastLoopTime;
+        // Clamp delta to avoid spiral of death after tab suspension
+        if (delta > 200) delta = TARGET_FRAME_MS;
+        timeAccumulator += delta * speedRef.current;
+      }
+      lastLoopTime = timestamp;
+
       try {
-        // Run frames based on speed multiplier
-        // Halve speed since requestAnimationFrame runs at ~120fps on high refresh displays
-        // Use accumulator for fractional speeds
-        accumulator += speedRef.current / 2;
-        while (accumulator >= 1) {
+        // Run one emulated frame per 16.67ms of accumulated time
+        let framesThisTick = 0;
+        while (timeAccumulator >= TARGET_FRAME_MS) {
           const t0 = performance.now();
           backend.runFrame();
           const elapsed = performance.now() - t0;
           totalFrames++;
+          framesThisTick++;
+          timeAccumulator -= TARGET_FRAME_MS;
 
           // Detect slow frames (>100ms means we're blocking the UI thread)
           if (elapsed > 100) {
@@ -443,21 +459,27 @@ export function Calculator({
             if (slowFrameCount > 0) {
               console.log(`[EMU] Recovered after ${slowFrameCount} slow frames`);
             }
-            slowFrameCount = 0; // Reset on good frame
+            slowFrameCount = 0;
           }
 
-          accumulator -= 1;
+          // Safety: don't run more than 4 frames per rAF to avoid blocking UI
+          if (framesThisTick >= 4) {
+            timeAccumulator = 0;
+            break;
+          }
         }
 
-        // Render
-        renderFrame();
+        // Render if we ran at least one frame
+        if (framesThisTick > 0) {
+          renderFrame();
+        }
       } catch (e) {
         // Backend was destroyed during frame - safe to ignore
         console.warn("Frame error (safe to ignore during backend switch):", e);
         return;
       }
 
-      // Calculate FPS
+      // Calculate FPS (count emulated frames rendered to screen)
       frameCount.current++;
       const now = performance.now();
       if (now - lastFrameTime.current >= 1000) {
@@ -586,10 +608,9 @@ export function Calculator({
     }
   };
 
-  // Handle loading .8xp/.8xv program files
-  const handleProgramFiles = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
+  // Core logic for injecting .8xp/.8xv program files
+  const loadProgramFiles = useCallback(async (files: File[]) => {
+    if (files.length === 0) return;
 
     const romData = romDataRef.current;
     if (!romData) {
@@ -599,7 +620,7 @@ export function Calculator({
 
     // Read all selected files
     const fileEntries: { name: string; data: Uint8Array }[] = [];
-    for (const file of Array.from(files)) {
+    for (const file of files) {
       const buffer = await file.arrayBuffer();
       fileEntries.push({ name: file.name, data: new Uint8Array(buffer) });
     }
@@ -645,19 +666,93 @@ export function Calculator({
 
       console.log(`[Program] Total entries injected: ${totalInjected}`);
 
-      // Power on and start
-      freshBackend.powerOn();
+      // Start animation loop, then press ON key to power on.
+      // We use setKey instead of powerOn() because powerOn() does press+release
+      // with zero cycles in between, leaving a stale irq_pending that causes
+      // a spurious interrupt during boot. setKey + delayed release matches
+      // the normal user flow (hold ON, boot runs, release ON).
       setRomLoaded(true);
       setIsRunning(true);
       setError(null);
+      freshBackend.setKey(2, 0, true);  // ON key press → powered_on = true
+      setTimeout(() => freshBackend.setKey(2, 0, false), 300);  // Release after boot starts
     } catch (err) {
       console.error("[Program] Error:", err);
       setError(`Failed to load programs: ${err}`);
     }
+  }, []);
 
+  // Handle file input change for .8xp/.8xv programs
+  const handleProgramFiles = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    await loadProgramFiles(Array.from(files));
     // Reset the file input so the same files can be re-selected
     e.target.value = "";
+  }, [loadProgramFiles]);
+
+  // Drag-and-drop support for .rom, .8xp, .8xv files
+  const PROGRAM_EXTENSIONS = [".8xp", ".8xv"];
+  const ROM_EXTENSIONS = [".rom", ".bin"];
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current++;
+    if (dragCounterRef.current === 1) {
+      setIsDragging(true);
+    }
   }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current--;
+    if (dragCounterRef.current === 0) {
+      setIsDragging(false);
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
+
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current = 0;
+    setIsDragging(false);
+
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length === 0) return;
+
+    const romFiles: File[] = [];
+    const programFilesList: File[] = [];
+
+    for (const file of files) {
+      const name = file.name.toLowerCase();
+      if (ROM_EXTENSIONS.some(ext => name.endsWith(ext))) {
+        romFiles.push(file);
+      } else if (PROGRAM_EXTENSIONS.some(ext => name.endsWith(ext))) {
+        programFilesList.push(file);
+      }
+    }
+
+    // Load ROM first if present (only use the first one)
+    if (romFiles.length > 0) {
+      await handleRomLoad(romFiles[0]);
+    }
+
+    // Then inject program files
+    if (programFilesList.length > 0) {
+      await loadProgramFiles(programFilesList);
+    }
+
+    if (romFiles.length === 0 && programFilesList.length === 0) {
+      setError("Unsupported file type. Drop .rom, .8xp, or .8xv files.");
+    }
+  }, [handleRomLoad, loadProgramFiles]);
 
   const handleBackendChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newBackend = e.target.value as BackendType;
@@ -685,17 +780,51 @@ export function Calculator({
   return (
     <div
       className={className}
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
       style={{
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
         gap: fullscreen ? "0.5rem" : "1rem",
+        position: "relative",
+        minHeight: "200px",
         ...(fullscreen && {
           transform: "scale(1)",
           transformOrigin: "center center",
         }),
       }}
     >
+      {/* Drag-and-drop overlay */}
+      {isDragging && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            background: "rgba(59, 130, 246, 0.15)",
+            border: "3px dashed rgba(59, 130, 246, 0.6)",
+            borderRadius: "12px",
+            zIndex: 100,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            pointerEvents: "none",
+          }}
+        >
+          <span style={{
+            fontSize: "1.25rem",
+            fontWeight: "bold",
+            color: "rgba(59, 130, 246, 0.8)",
+            background: "rgba(255, 255, 255, 0.9)",
+            padding: "0.75rem 1.5rem",
+            borderRadius: "8px",
+          }}>
+            Drop .rom, .8xp, or .8xv files
+          </span>
+        </div>
+      )}
       {/* Header and backend selector - only on non-demo */}
       {!useBundledRom && (
         <>
@@ -759,26 +888,6 @@ export function Calculator({
               style={{ marginTop: "0.5rem" }}
             />
           </label>
-          {romLoaded && (
-            <div style={{ marginTop: "1rem" }}>
-              <label htmlFor="program-input" style={{ cursor: "pointer" }}>
-                <p>Load .8xp/.8xv programs (optional)</p>
-                <input
-                  id="program-input"
-                  type="file"
-                  accept=".8xp,.8xv"
-                  multiple
-                  onChange={handleProgramFiles}
-                  style={{ marginTop: "0.5rem" }}
-                />
-              </label>
-              {programFiles.length > 0 && (
-                <p style={{ fontSize: "0.85rem", color: "#888" }}>
-                  Loaded: {programFiles.join(", ")}
-                </p>
-              )}
-            </div>
-          )}
         </div>
       )}
 
@@ -864,13 +973,35 @@ export function Calculator({
               Reset
             </button>
             {!useBundledRom && (
-              <button
-                onClick={handleEjectRom}
-                style={{ padding: "6px 16px" }}
-                title="E"
-              >
-                Eject
-              </button>
+              <>
+                <button
+                  onClick={handleEjectRom}
+                  style={{ padding: "6px 16px" }}
+                  title="E"
+                >
+                  Eject
+                </button>
+                <button
+                  onClick={() => programInputRef.current?.click()}
+                  style={{ padding: "6px 16px" }}
+                  title="Load .8xp/.8xv programs"
+                >
+                  Send File
+                </button>
+                <input
+                  ref={programInputRef}
+                  type="file"
+                  accept=".8xp,.8xv"
+                  multiple
+                  onChange={handleProgramFiles}
+                  style={{ display: "none" }}
+                />
+                {programFiles.length > 0 && (
+                  <span style={{ fontSize: "0.75rem", color: "#888" }}>
+                    {programFiles.join(", ")}
+                  </span>
+                )}
+              </>
             )}
             <div
               style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}
