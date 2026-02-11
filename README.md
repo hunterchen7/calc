@@ -69,7 +69,7 @@ The CEmu adapter (`android/app/src/main/cpp/cemu/`) wraps CEmu's C code to match
 The emulator recreates the TI-84 Plus CE hardware in software:
 
 1. **Loads ROM** - The calculator's operating system (you provide this)
-2. **Executes CPU** - Runs eZ80 instructions at ~48MHz emulated speed
+2. **Executes CPU** - Runs eZ80 instructions at ~48MHz emulated speed (this can be changed to run at higher or lower speeds)
 3. **Renders Display** - 320x240 16-bit color LCD at 60 FPS
 4. **Handles Input** - 8x7 key matrix matching the physical calculator
 5. **Emulates Peripherals** - Timers, real-time clock, interrupts, etc.
@@ -217,18 +217,35 @@ The web app runs entirely in the browser using WebAssembly (~96KB gzipped).
 
 **Keyboard Controls:**
 
-| Key        | Function        |
-| ---------- | --------------- |
-| 0-9        | Number keys     |
-| + - \* /   | Math operations |
-| ( )        | Parentheses     |
-| Enter      | Enter           |
-| Backspace  | Delete          |
-| Arrow keys | Navigation      |
-| Escape     | Mode            |
-| Shift      | 2nd             |
-| Alt        | Alpha           |
-| O          | ON key          |
+| Key                | Function                           |
+| ------------------ | ---------------------------------- |
+| 0-9                | Number keys                        |
+| + - \* /           | Math operations                    |
+| ( )                | Parentheses                        |
+| ^                  | Power                              |
+| .                  | Decimal                            |
+| ,                  | Comma                              |
+| \_                 | Negate (-)                         |
+| Enter              | Enter                              |
+| Backspace / Delete | Del                                |
+| Arrow keys         | Navigation                         |
+| Escape             | Mode                               |
+| Shift              | 2nd                                |
+| Alt                | Alpha                              |
+| O                  | ON                                 |
+| Space              | Pause emulation                    |
+| V                  | √ (square root)                    |
+| S / C / T          | Sin / Cos / Tan                    |
+| L / G              | Ln / Log                           |
+| M                  | Math                               |
+| R                  | x⁻¹                                |
+| X                  | X,T,θ,n                            |
+| Insert             | Sto                                |
+| F1-F5              | Y= / Window / Zoom / Trace / Graph |
+| Home               | Apps                               |
+| PageDown           | Prgm                               |
+| PageUp             | Vars                               |
+| End                | Stat                               |
 
 ### Development Workflow
 
@@ -372,14 +389,16 @@ For more options, use the debug tool directly (from `core/`):
 cargo run --release --example debug -- <command>
 ```
 
-| Command           | Description                                              |
-| ----------------- | -------------------------------------------------------- |
-| `boot`            | Run boot test with progress reporting                    |
-| `trace [steps]`   | Generate trace log for parity comparison (default: 100k) |
-| `screen [output]` | Render screen to PNG after boot (default: screen.png)    |
-| `vram`            | Analyze VRAM content (color histogram)                   |
-| `compare <file>`  | Compare our trace with CEmu trace file                   |
-| `help`            | Show help message                                        |
+| Command                 | Description                                                 |
+| ----------------------- | ----------------------------------------------------------- |
+| `boot`                  | Run boot test with progress reporting                       |
+| `trace [steps]`         | Generate trace log for parity comparison (default: 100k)    |
+| `screen [output]`       | Render screen to PNG after boot (default: screen.png)       |
+| `vram`                  | Analyze VRAM content (color histogram)                      |
+| `compare <file>`        | Compare our trace with CEmu trace file                      |
+| `sendfile <files>`      | Inject `.8xp`/`.8xv` files into flash, boot, and screenshot |
+| `bakerom <out> [files]` | Create a new ROM with programs pre-installed in flash       |
+| `help`                  | Show help message                                           |
 
 **Examples:**
 
@@ -420,6 +439,46 @@ cargo run --release --example debug -- compare ../tools/cemu-test/cemu_trace.txt
 2. Install the app
 3. Use "Import ROM" to load your ROM file
 4. Press Run to start emulation
+
+### Loading Programs (.8xp / .8xv)
+
+The emulator supports loading TI-84 CE programs (`.8xp`) and AppVars (`.8xv`) into the calculator's flash archive. This is how you run third-party programs like games.
+
+**From the app:** Use the file picker in the web, Android, or iOS app to select `.8xp`/`.8xv` files. They will be injected into flash and available in the program menu after the next boot.
+
+**From the CLI:** The debug tool provides two commands for loading programs:
+
+#### `sendfile` — Inject and run
+
+Loads the ROM, injects files into flash, boots the emulator, and saves a screenshot. Useful for quick testing.
+
+```bash
+cd core
+
+# Inject a single program
+cargo run --release --example debug -- sendfile DOOM.8xp
+
+# Inject a program with its required C libraries
+cargo run --release --example debug -- sendfile DOOM.8xp clibs/*.8xv
+```
+
+Programs that use the CE C toolchain (e.g., games built with graphx) need their library `.8xv` files included. Common libraries: `libload.8xv`, `graphx.8xv`, `keypadc.8xv`, `fileioc.8xv`.
+
+#### `bakerom` — Create a pre-loaded ROM
+
+Creates a new ROM file with programs pre-installed in the flash archive. The output ROM can be loaded directly and programs will appear in TI-OS without needing to inject files each time.
+
+```bash
+cd core
+
+# Bake a ROM with DOOM pre-installed
+cargo run --release --example debug -- bakerom doom.rom DOOM.8xp clibs/*.8xv
+
+# Then use the baked ROM like any other ROM file
+cargo run --release --example debug -- boot  # (with doom.rom as your ROM)
+```
+
+This is useful for creating a ROM that's ready to go with your favorite programs already installed.
 
 ## License
 
